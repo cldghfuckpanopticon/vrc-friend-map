@@ -133,6 +133,8 @@ export interface LoggerStats {
   worlds: [string, number][];
 }
 
+export type GraphicsMode = "auto" | "gpu" | "software";
+
 export const backend = {
   async sessionInfo(): Promise<SessionInfo> {
     if (!isTauri) return { logged_in: false, user_id: null, display_name: null };
@@ -193,6 +195,17 @@ export const backend = {
   async platform(): Promise<string> {
     if (!isTauri) return "browser";
     return invoke<string>("app_platform");
+  },
+  /** Saved graphics-acceleration choice; applies at the next start. Null outside the desktop app. */
+  async graphicsGet(): Promise<{ mode: GraphicsMode; supported: boolean } | null> {
+    if (!isTauri) return null;
+    return invoke("graphics_get");
+  },
+  async graphicsSet(mode: GraphicsMode): Promise<void> {
+    if (isTauri) await invoke("graphics_set", { mode });
+  },
+  async restartApp(): Promise<void> {
+    if (isTauri) await invoke("app_restart");
   },
   async logsDetect(): Promise<string[]> {
     if (!isTauri) return [];

@@ -3,6 +3,7 @@ mod auth;
 #[cfg(all(target_os = "linux", vfm_gdk_no_wayland))]
 mod gdk_stubs;
 mod gamelogs;
+pub mod graphics;
 mod images;
 mod pipeline;
 mod share;
@@ -227,6 +228,35 @@ fn app_platform() -> &'static str {
     std::env::consts::OS
 }
 
+// ---------- graphics acceleration (desktop; see graphics.rs) ----------
+
+#[derive(serde::Serialize)]
+struct GraphicsInfo {
+    /// "auto", "gpu" or "software": what is saved (applies at the next start).
+    mode: &'static str,
+    /// false where the web view can't be steered (macOS, Android, iOS).
+    supported: bool,
+}
+
+#[tauri::command]
+fn graphics_get(state: AppStateRef<'_>) -> GraphicsInfo {
+    GraphicsInfo { mode: graphics::read(&state.data_dir).as_str(), supported: graphics::supported() }
+}
+
+#[tauri::command]
+fn graphics_set(state: AppStateRef<'_>, mode: String) -> Result<(), String> {
+    if !graphics::supported() {
+        return Err("not supported on this system".into());
+    }
+    let mode = graphics::Mode::parse(&mode).ok_or("unknown graphics mode")?;
+    graphics::write(&state.data_dir, mode)
+}
+
+#[tauri::command]
+fn app_restart(app: AppHandle) {
+    app.restart()
+}
+
 // ---------- VRChat game logs (desktop) ----------
 
 #[tauri::command]
@@ -324,6 +354,8 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("vrcimg", images::handle)
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            debug_assert_eq!(graphics::early_data_dir().as_deref(), Some(data_dir.as_path()));
             let cache_dir = app.path().app_cache_dir()?;
             let image_dir = cache_dir.join("images");
             std::fs::create_dir_all(data_dir.join("store"))?;
@@ -356,6 +388,9 @@ pub fn run() {
             store_write,
             store_backup,
             app_platform,
+            graphics_get,
+            graphics_set,
+            app_restart,
             logs_detect,
             logs_scan,
             logs_info,

@@ -3,6 +3,16 @@
 Versions follow [Semantic Versioning](https://semver.org). While the version is 0.x,
 minor releases can change behavior.
 
+## Unreleased
+
+### Added
+- Settings → **Graphics**: choose *Automatic*, *Prefer GPU* or *Software only* for drawing the
+  map (Windows and Linux). *Prefer GPU* asks the web view for hardware acceleration even where
+  it would normally avoid it; *Software only* turns the GPU off, as a fallback for broken
+  drivers. The choice is read at startup, so the app offers to restart. On Windows it passes
+  Chromium GPU switches to WebView2 (added to any `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` you
+  set); on Linux it sets WebKitGTK's compositing variables. `VRC_FRIEND_MAP_DMABUF` still works.
+
 ## 0.7.3 (2026-11-11)
 
 ### Fixed

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { backend } from "../backend";
+import { backend, type GraphicsMode } from "../backend";
 import { forgetLogHistory, logsSupported, naiveToDate, scanLogs } from "../logs";
 import { exitDemo, logoutAll, wipeEverything } from "../session";
 import { getState, setState, updateCache, updateGroupSettings, updateSounds, updateLocal, updateLogSettings, updateMap, updateSettings, useApp } from "../store";
@@ -181,6 +181,8 @@ export function SettingsModal() {
           <GroupSection />
         </section>
 
+        <GraphicsSection />
+
         <section>
           <h3>Local data</h3>
           {demo ? (
@@ -226,6 +228,67 @@ const RETENTION = [
   [180, "6 months"],
   [365, "1 year"],
 ] as const;
+
+const GRAPHICS_MODES: { value: GraphicsMode; label: string; hint: string }[] = [
+  { value: "auto", label: "Automatic", hint: "The app's default. Uses the GPU when the system allows it." },
+  { value: "gpu", label: "Prefer GPU", hint: "Ask for hardware acceleration even if the system would normally avoid it." },
+  { value: "software", label: "Software only", hint: "Draw on the CPU. Try this if the map flickers, is blank or the app crashes." },
+];
+
+/** Hardware acceleration for the map. The web view reads this at startup, so a restart applies it. */
+function GraphicsSection() {
+  // What the app started with; changes only apply after a restart.
+  const [started, setStarted] = useState<GraphicsMode | null>(null);
+  const [mode, setMode] = useState<GraphicsMode>("auto");
+  const [supported, setSupported] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    backend
+      .graphicsGet()
+      .then((g) => {
+        if (!g) return;
+        setSupported(g.supported);
+        setStarted(g.mode);
+        setMode(g.mode);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Browser, macOS, Android, iOS: nothing to choose.
+  if (!supported) return null;
+
+  const choose = (m: GraphicsMode) => {
+    setMode(m);
+    setErr("");
+    backend.graphicsSet(m).catch((e) => setErr(String(e)));
+  };
+  const needsRestart = started !== null && started !== mode;
+
+  return (
+    <section>
+      <h3>Graphics</h3>
+      <p className="small muted">Whether the map is drawn with your graphics card (GPU) or your processor. Takes effect after a restart.</p>
+      <div className="row">
+        {GRAPHICS_MODES.map((o) => (
+          <label key={o.value} className="check" title={o.hint}>
+            <input type="radio" name="graphics-mode" checked={mode === o.value} onChange={() => choose(o.value)} />
+            {o.label}
+          </label>
+        ))}
+      </div>
+      <p className="small muted">{GRAPHICS_MODES.find((o) => o.value === mode)?.hint}</p>
+      {err && <p className="small">{err}</p>}
+      {needsRestart && (
+        <div className="row">
+          <button className="btn" onClick={() => backend.restartApp()}>
+            Restart to apply
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function GameLogSection() {
   const logs = useApp((s) => s.logs);

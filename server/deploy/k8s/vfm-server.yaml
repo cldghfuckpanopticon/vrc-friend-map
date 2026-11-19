@@ -10,8 +10,8 @@
 # over the public gateway doesn't match any rule there and gets a 404 from Envoy before
 # it ever reaches the pod. The internal HTTPRoute is the only place /admin is routed.
 #
-# Hostnames below (vfm.jaceee.dev, vfm-server.internal.rune.local) are examples: change
-# them, and give gateway-public an HTTPS listener named like the sectionName.
+# Public hostname: vfm.jaceee.com. Internal: vfm-server.internal.rune.local (change it to
+# suit). gateway-public needs an HTTPS listener named vfm-jaceee-com for vfm.jaceee.com.
 #
 # Before applying, create the admin token secret (don't commit real values):
 #   kubectl create namespace vfm-server --dry-run=client -o yaml | kubectl apply -f -
@@ -79,7 +79,7 @@ spec:
           env:
             # The image already sets VFM_CONFIG=/data/vfm-server.toml (data next to it in /data/vfm-data).
             - name: VFM_PUBLIC_URL             # only used in the startup message (kubectl logs)
-              value: "https://vfm.jaceee.dev"
+              value: "https://vfm.jaceee.com"
             - name: VFM_ADMIN_ALLOW            # checked against the connection's address, which is Envoy's
               value: "lan"                     # pod IP (private) for both gateways; the public route never
                                                # routes /admin, so that's the real boundary
@@ -141,11 +141,11 @@ metadata:
     jaceee.dev/envoy-proxy-inject: "true"
 spec:
   hostnames:
-    - vfm.jaceee.dev
+    - vfm.jaceee.com
   parentRefs:
     - name: gateway-public
       namespace: gateway-system
-      sectionName: vfm-jaceee-dev         # the gateway needs an HTTPS listener with this name for vfm.jaceee.dev
+      sectionName: vfm-jaceee-com         # the gateway needs an HTTPS listener with this name for vfm.jaceee.com
   rules:
     # Live updates: a server-sent event stream that stays open, so no request timeout.
     - backendRefs:

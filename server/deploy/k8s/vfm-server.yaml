@@ -1,0 +1,250 @@
+# vfm-server on Kubernetes: Deployment + Service + PVC + Gateway API HTTPRoutes + CiliumNetworkPolicy.
+#   kubectl apply -f server/deploy/k8s/vfm-server.yaml
+# Build & push the image first (server/deploy/build-push.sh), then pin the tag below.
+#
+# Layout: ONE pod serves the app API and the admin page on port 8787, but they're
+# reachable from different places:
+#   - /v1/* and /   (what the app talks to, plus the landing page) -> gateway-public   -> world
+#   - /admin*       (admin page and its API)                        -> gateway-internal -> cluster/VPN only
+# The public HTTPRoute only has rules for /v1 and /, so a request for /admin arriving
+# over the public gateway doesn't match any rule there and gets a 404 from Envoy before
+# it ever reaches the pod. The internal HTTPRoute is the only place /admin is routed.
+#
+# Hostnames below (vfm.jaceee.dev, vfm-server.internal.rune.local) are examples: change
+# them, and give gateway-public an HTTPS listener named like the sectionName.
+#
+# Before applying, create the admin token secret (don't commit real values):
+#   kubectl create namespace vfm-server --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n vfm-server create secret generic vfm-server-admin \
+#     --from-literal=VFM_ADMIN_TOKEN="$(openssl rand -hex 24)"
+# Then open https://vfm-server.internal.rune.local/admin with that token. Settings not
+# fixed by VFM_* variables below (name, registration, encryption, logger…) are managed
+# there and kept in /data/vfm-server.toml. Make invite codes on the admin page, or:
+#   kubectl -n vfm-server exec deploy/vfm-server -- /vfm-server invite
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vfm-server
+  labels:
+    pod-security.kubernetes.io/enforce: restricted   # the pod below meets "restricted"
+
+---
+# Settings, accounts, shared items, the server keys (server.key!) and the logger's
+# history live here, so they survive pod restarts/rollouts. Back this volume up:
+# losing server.key makes every app warn that the server's identity changed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vfm-server-data
+  namespace: vfm-server
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi   # items are capped per upload (max_item_kb); a few hundred users fit in well under 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vfm-server
+  namespace: vfm-server
+spec:
+  replicas: 1                          # one data folder (RWO) and one VRChat logger session: stays at 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate                     # RWO volume can't be mounted by two pods at once
+  selector:
+    matchLabels: { app: vfm-server }
+  template:
+    metadata:
+      labels: { app: vfm-server }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false        # no VFM_SERVER_* service env vars next to the app's own VFM_* settings
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532               # the image's user
+        runAsGroup: 65532
+        fsGroup: 65532                 # so the PVC mount is writable by the app user
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: cr-0.rune.local/vfm-server:latest   # pin a real tag from build-push.sh for repeatable rollouts
+          imagePullPolicy: Always                    # :latest moves; with IfNotPresent the node can keep running a stale cached image
+          ports:
+            - name: http
+              containerPort: 8787
+          env:
+            # The image already sets VFM_CONFIG=/data/vfm-server.toml (data next to it in /data/vfm-data).
+            - name: VFM_PUBLIC_URL             # only used in the startup message (kubectl logs)
+              value: "https://vfm.jaceee.dev"
+            - name: VFM_ADMIN_ALLOW            # checked against the connection's address, which is Envoy's
+              value: "lan"                     # pod IP (private) for both gateways; the public route never
+                                               # routes /admin, so that's the real boundary
+            - name: VFM_TRUSTED_PROXY          # behind Envoy: take visitors' addresses from X-Forwarded-For,
+              value: "true"                    # otherwise everyone looks like Envoy and an IP ban hits all.
+                                               # The server uses the first entry, which a client can prefill:
+                                               # IP bans are best effort (account bans aren't affected)
+            - name: VFM_ADMIN_TOKEN            # at least 16 characters
+              valueFrom: { secretKeyRef: { name: vfm-server-admin, key: VFM_ADMIN_TOKEN } }
+            # Optional, fixed here instead of on the admin page (see server/README.md):
+            # - { name: VFM_NAME, value: "My VRC Friend Map server" }
+            # - { name: VFM_REGISTRATION, value: "invite" }     # open | invite | closed
+            # - { name: VFM_ENCRYPTION, value: "force-on" }     # force-off | optional | recommended | force-on
+            # - { name: VFM_LOGGER, value: "true" }
+            # - { name: VFM_CONTACT, value: "your Discord name" }  # added to the User-Agent VRChat sees
+          readinessProbe:
+            httpGet: { path: /v1/info, port: http }   # what `vfm-server healthcheck` asks too
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 256Mi }               # it idles around a few MB; compose uses 128m
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true            # it only writes to /data
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: vfm-server-data }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vfm-server
+  namespace: vfm-server
+spec:
+  selector: { app: vfm-server }
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+# Public: the app's API (/v1/...) and the landing page. Everything else (/admin*)
+# only matches on the internal route below, so it 404s here before reaching the pod.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vfm-server-public
+  namespace: vfm-server                   # same namespace as the Service, so no ReferenceGrant is needed
+  annotations:
+    jaceee.dev/envoy-proxy-inject: "true"
+spec:
+  hostnames:
+    - vfm.jaceee.dev
+  parentRefs:
+    - name: gateway-public
+      namespace: gateway-system
+      sectionName: vfm-jaceee-dev         # the gateway needs an HTTPS listener with this name for vfm.jaceee.dev
+  rules:
+    # Live updates: a server-sent event stream that stays open, so no request timeout.
+    - backendRefs:
+        - kind: Service
+          name: vfm-server
+          namespace: vfm-server
+          port: 80
+      matches:
+        - path: { type: Exact, value: /v1/events }
+      timeouts:
+        request: "0s"                     # 0s = no timeout (Gateway API); without it Envoy cuts the stream
+    - backendRefs:
+        - kind: Service
+          name: vfm-server
+          namespace: vfm-server
+          port: 80
+      matches:
+        - path: { type: PathPrefix, value: /v1 }   # register, items, inbox, logger, cache, info…
+    - backendRefs:
+        - kind: Service
+          name: vfm-server
+          namespace: vfm-server
+          port: 80
+      matches:
+        - path: { type: Exact, value: / }          # landing page ("add this address in the app")
+
+---
+# Admin page: internal only, never routed through gateway-public. The app's API is
+# routed here too, so people on the VPN can use the internal address in the app.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vfm-server-admin
+  namespace: vfm-server
+spec:
+  hostnames:
+    - vfm-server.internal.rune.local
+  parentRefs:
+    - name: gateway-internal
+      namespace: gateway-system
+  rules:
+    - backendRefs:
+        - kind: Service
+          name: vfm-server
+          namespace: vfm-server
+          port: 80
+      matches:
+        - path: { type: Exact, value: /v1/events }
+      timeouts:
+        request: "0s"
+    - backendRefs:
+        - kind: Service
+          name: vfm-server
+          namespace: vfm-server
+          port: 80
+      matches:
+        - path: { type: PathPrefix, value: / }
+
+---
+# Ingress: world on 8787 (the app via gateway-public's Envoy) and cluster on 8787
+# (/admin via gateway-internal's Envoy, and kubelet probes, which Cilium always
+# allows regardless of this policy).
+# Egress, unlike a purely local service: DNS, plus HTTPS out. The logger talks to
+# api.vrchat.cloud and pipeline.vrchat.cloud (WebSocket), the update check to
+# api.github.com, and push mode posts to whatever UnifiedPush endpoint the owner's
+# phone registered (ntfy.sh or a self-hosted distributor), which can't be listed
+# in advance, hence world:443 rather than toFQDNs. Without the logger and push mode
+# you could narrow it to toFQDNs for the three hosts above.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vfm-server-restrict
+  namespace: vfm-server
+spec:
+  endpointSelector:
+    matchLabels:
+      app: vfm-server
+  ingress:
+    - fromEntities:
+        - world
+        - cluster
+      toPorts:
+        - ports:
+            - port: "8787"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

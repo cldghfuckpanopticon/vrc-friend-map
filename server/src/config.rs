@@ -169,6 +169,7 @@ impl Config {
         for key in [
             "VFM_NAME", "VFM_LISTEN", "VFM_MOTD", "VFM_DATA_DIR", "VFM_REGISTRATION", "VFM_ENCRYPTION", "VFM_MAX_ITEM_KB", "VFM_MAX_USERS",
             "VFM_LOGGER", "VFM_RESYNC_MINUTES", "VFM_CONTACT", "VFM_KEEP_HOPS_MONTHS", "VFM_ADMIN_ALLOW", "VFM_ADMIN_TOKEN",
+            "VFM_TRUSTED_PROXY",
         ] {
             let Some(v) = get(key) else { continue };
             match key {
@@ -185,6 +186,7 @@ impl Config {
                 "VFM_MAX_ITEM_KB" => self.access.max_item_kb = parse_num(key, &v)?.clamp(16, 16 * 1024) as usize,
                 "VFM_MAX_USERS" => self.access.max_users = parse_num(key, &v)?.clamp(1, 100_000) as usize,
                 "VFM_LOGGER" => self.logger.enabled = parse_bool(key, &v)?,
+                "VFM_TRUSTED_PROXY" => self.server.trusted_proxy = parse_bool(key, &v)?,
                 "VFM_RESYNC_MINUTES" => self.logger.resync_minutes = parse_num(key, &v)?.max(10),
                 "VFM_CONTACT" => self.logger.contact = v,
                 "VFM_KEEP_HOPS_MONTHS" => self.logger.keep_hops_months = parse_num(key, &v)?.min(1200) as u32,
@@ -348,10 +350,12 @@ mod tests {
             "VFM_LOGGER" => Some("false".to_string()),
             "VFM_ADMIN_ALLOW" => Some("any".to_string()),
             "VFM_NAME" => Some("Box".to_string()),
+            "VFM_TRUSTED_PROXY" => Some("yes".to_string()),
             _ => None,
         };
         let used = c.apply_vars(env).unwrap();
-        assert_eq!(used.len(), 5);
+        assert_eq!(used.len(), 6);
+        assert!(c.server.trusted_proxy);
         assert_eq!(c.access.encryption, EncryptionPolicy::ForceOn);
         assert_eq!(c.access.registration, Registration::Open);
         assert!(!c.logger.enabled);

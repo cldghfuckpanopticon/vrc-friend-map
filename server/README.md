@@ -184,6 +184,7 @@ admin page shows them as fixed. Leave them out to manage everything on the admin
 | `VFM_LOGGER` | `true` / `false` |
 | `VFM_CONTACT` | added to the User-Agent VRChat sees |
 | `VFM_ADMIN_ALLOW` | `off`, `local`, `lan`, `any` |
+| `VFM_TRUSTED_PROXY` | `true` / `false`: behind a reverse proxy, take visitors' addresses from X-Forwarded-For |
 | `VFM_ADMIN_TOKEN` | at least 16 characters (otherwise one is generated) |
 | `VFM_MAX_ITEM_KB`, `VFM_MAX_USERS`, `VFM_RESYNC_MINUTES`, `VFM_KEEP_HOPS_MONTHS` | numbers |
 | `VFM_PUBLIC_URL` | only changes what the startup message tells you to enter in the app |

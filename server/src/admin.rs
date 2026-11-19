@@ -352,6 +352,7 @@ async fn settings(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<So
     if locked("VFM_MAX_ITEM_KB") { b.max_item_kb = None; }
     if locked("VFM_MAX_USERS") { b.max_users = None; }
     if locked("VFM_LOGGER") { b.logger_enabled = None; }
+    if locked("VFM_TRUSTED_PROXY") { b.trusted_proxy = None; }
     let (was_enabled, now_enabled) = {
         let mut c = app.cfg.write().unwrap();
         let was = c.logger.enabled;

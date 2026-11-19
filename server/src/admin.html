@@ -269,7 +269,7 @@ async function load() {
     $("#admins").innerHTML = a.admins.map((x) => `<tr><td>${esc(x.name)}${x.name === a.me ? ' <span class="pill">you</span>' : ""}</td><td>${x.totp ? '<span class="ok">set up</span>' : '<span class="warn">none</span>'}</td><td>${ago(x.lastLogin)}</td><td>${x.name === a.me ? "" : `<button class="danger" data-admin="${esc(x.name)}">Remove</button>`}</td></tr>`).join("") || `<tr><td colspan=4 class="dim">No admin accounts yet (you're using the admin token).</td></tr>`;
   }).catch(() => {});
   // Fields fixed by VFM_* environment variables (container setups).
-  const ENV = { name: "VFM_NAME", motd: "VFM_MOTD", registration: "VFM_REGISTRATION", encryption: "VFM_ENCRYPTION", maxItemKb: "VFM_MAX_ITEM_KB", maxUsers: "VFM_MAX_USERS", loggerEnabled: "VFM_LOGGER" };
+  const ENV = { name: "VFM_NAME", motd: "VFM_MOTD", registration: "VFM_REGISTRATION", encryption: "VFM_ENCRYPTION", maxItemKb: "VFM_MAX_ITEM_KB", maxUsers: "VFM_MAX_USERS", loggerEnabled: "VFM_LOGGER", trustedProxy: "VFM_TRUSTED_PROXY" };
   for (const [k, v] of Object.entries(ENV)) {
     const locked = (s.envLocked || []).includes(v);
     f[k].disabled = locked;

@@ -55,7 +55,7 @@ export interface AppState {
   /** No VRChat login on this device: everything comes from servers (records), read only.
    *  The account (VRChat user ID) this device reads as. */
   serverOnly: string | null;
-  /** When records from a server last changed the cache (server-only devices show it). */
+  /** When this device last synced records with a server (shown while reading from one). */
   recordsAt: number;
   /** Logged in, but another of your devices holds the lease on this server (URL): this
    *  device reads VRChat data from there instead of fetching it itself. */

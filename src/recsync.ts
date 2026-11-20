@@ -300,8 +300,8 @@ async function applyResult(s: ShareServer, res: RecSyncResult, full: boolean) {
     // holder may have just taken the lease and not uploaded yet): never wipe it for nothing.
     const replace = (res.reset || full) && api.some((c) => c.c === "me" && c.key === "me" && !c.deleted);
     const resolved = await resolveDeletions(replace ? emptyCache() : getState().cache, api);
-    updateCache((c) => applyRecords(replace ? { ...emptyCache(), linkReads: c.linkReads, ageHints: c.ageHints } : c, resolved));
-    if (api.length) setState({ recordsAt: Date.now() });
+    if (api.length) updateCache((c) => applyRecords(replace ? { ...emptyCache(), linkReads: c.linkReads, ageHints: c.ageHints } : c, resolved));
+    setState({ recordsAt: Date.now() });
   }
   // Visits from your other VRChat clients.
   const visits = res.changes.filter((c) => c.c === "visits" && c.source !== device());

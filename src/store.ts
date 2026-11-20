@@ -57,6 +57,9 @@ export interface AppState {
   serverOnly: string | null;
   /** When records from a server last changed the cache (server-only devices show it). */
   recordsAt: number;
+  /** Logged in, but another of your devices holds the lease on this server (URL): this
+   *  device reads VRChat data from there instead of fetching it itself. */
+  following: string | null;
   session: SessionInfo | null;
   loginMessage: string;
   loginBusy: boolean;
@@ -361,6 +364,7 @@ let state: AppState = {
   demo: false,
   serverOnly: null,
   recordsAt: 0,
+  following: null,
   session: null,
   loginMessage: "",
   loginBusy: false,

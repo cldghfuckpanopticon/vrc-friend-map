@@ -104,6 +104,11 @@ open a VRChat connection: one session, one stable IP, no handovers, no gaps. Wit
 the first live device takes it (a desktop first, then a phone) and hands over when it stops renewing.
 This replaces today's heartbeat hand-off.
 
+A logged-in device without the lease **follows**: it stops its own full VRChat syncs and
+reads the holder's records. Interim, until invites and notifications are records too: it
+keeps VRChat's live connection (one websocket, no polling), so notifications still arrive on
+it.
+
 ### Authority: which observation wins
 
 Different producers **never write the same record**. The API's view of a friend's location is

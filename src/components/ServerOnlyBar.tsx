@@ -12,8 +12,19 @@ function ago(ms: number): string {
 /** Shown while this device reads everything from a server, without a VRChat login. */
 export function ServerOnlyBar() {
   const serverOnly = useApp((s) => s.serverOnly);
+  const following = useApp((s) => s.following);
   const at = useApp((s) => s.recordsAt);
-  const server = useApp((s) => s.settings.sharing.servers.find((x) => x.syncAll));
+  const server = useApp((s) => s.settings.sharing.servers.find((x) => (following ? x.url === following : x.syncAll)));
+  if (following && !serverOnly) {
+    return (
+      <div className="notice" role="status">
+        <span>
+          Another of your devices fetches your VRChat data and shares it through {server?.info?.name || server?.url || "your server"}; this one
+          reads it from there (last update {ago(at)}). It takes over by itself when that device goes offline.
+        </span>
+      </div>
+    );
+  }
   if (!serverOnly) return null;
   return (
     <div className="notice" role="status">

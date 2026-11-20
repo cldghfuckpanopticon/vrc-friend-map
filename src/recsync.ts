@@ -8,10 +8,14 @@
 //   key; the server can't read them.
 // - A device without a VRChat login (serverOnly) reads those records into its
 //   cache and shows them. It never takes the lease.
-// - Other logged-in devices keep fetching from VRChat themselves for now.
+// - A logged-in device that doesn't get the lease (another of your devices has it)
+//   follows: it stops its own full VRChat syncs and reads the holder's records. It
+//   keeps VRChat's live connection for now (invites and notifications aren't records
+//   yet). When the holder goes away it takes the lease and fetches again itself.
 
 import { backend, isMobile, type RecOut } from "./backend";
 import { emptyCache, getState, setState, subscribeState, updateCache, updateServer } from "./store";
+import { syncAll } from "./sync";
 import { addServer } from "./share";
 import type { Cache, ShareServer } from "./types";
 
@@ -226,6 +230,11 @@ async function exclusive(s: ShareServer, job: () => Promise<void>) {
 async function push(s: ShareServer) {
   const r = run(s);
   if (!r.held || getState().serverOnly) return;
+  // Mid-sync the cache is half old, half new (an app that just started): wait for VRChat.
+  if (getState().sync.running) {
+    schedulePush(s, 10_000);
+    return;
+  }
   await exclusive(s, async () => {
     const sent = loadSent(s);
     const { upserts, deletes, hashes } = diffRecords(cacheRecords(getState().cache), sent);
@@ -257,15 +266,20 @@ async function push(s: ShareServer) {
   });
 }
 
-/** Fetch what changed; a device without a VRChat login applies it. */
-async function pull(s: ShareServer) {
+/** Fetch what changed; a device without a VRChat login, or one following another
+ *  device, applies it. `full`: everything (when starting to follow). */
+async function pull(s: ShareServer, full = false) {
   await exclusive(s, async () => {
     const st = getState();
-    const res = await backend.records.sync(s.url, device(), false, READS, []);
-    if (!st.serverOnly) return; // logged-in devices fetch from VRChat themselves (for now)
+    const res = await backend.records.sync(s.url, device(), full, READS, []);
+    const reads = st.serverOnly || st.following === s.url;
+    if (!reads) return; // the lease holder fetches from VRChat itself
     const api = res.changes.filter((c) => API_COLLECTIONS.includes(c.c));
-    const resolved = await resolveDeletions(res.reset ? emptyCache() : getState().cache, api);
-    updateCache((c) => applyRecords(res.reset ? { ...emptyCache(), linkReads: c.linkReads, ageHints: c.ageHints } : c, resolved));
+    // Replace this device's copy only if the server really has the account's data (the
+    // holder may have just taken the lease and not uploaded yet): never wipe it for nothing.
+    const replace = (res.reset || full) && api.some((c) => c.c === "me" && c.key === "me" && !c.deleted);
+    const resolved = await resolveDeletions(replace ? emptyCache() : getState().cache, api);
+    updateCache((c) => applyRecords(replace ? { ...emptyCache(), linkReads: c.linkReads, ageHints: c.ageHints } : c, resolved));
     if (res.unreadable) note(s, `${res.unreadable} records couldn't be opened (another key?)`);
     if (api.length) setState({ recordsAt: Date.now() });
   });
@@ -299,11 +313,12 @@ function schedulePull(s: ShareServer, ms = PULL_DELAY_MS) {
 }
 
 /** Take or renew the lease on every server; pull where we don't hold it. */
-async function leaseRound() {
+export async function leaseRound() {
   const st = getState();
   for (const s of recordServers()) {
     const r = run(s);
-    if (st.serverOnly || !st.cache.me) {
+    // Logged in to VRChat (not the cache: a follower's cache comes from the server).
+    if (st.serverOnly || !st.session?.logged_in) {
       schedulePull(s, 0);
       continue;
     }
@@ -315,11 +330,23 @@ async function leaseRound() {
         // Just got it: another device may have written meanwhile, so upload everything once.
         saveSent(s, null);
         note(s, "took the lease");
+        if (getState().following === s.url) {
+          // Was following: fetch from VRChat again before speaking for the account.
+          setState({ following: null });
+          void syncAll();
+        }
         schedulePush(s, 0);
       } else if (!l.held && was) {
         note(s, `lease now with ${l.holder ?? "another device"}`);
       }
-      if (!l.held) schedulePull(s, 0);
+      if (!l.held) {
+        if (getState().following !== s.url && l.holder && l.holder !== device()) {
+          // Another of your devices fetches for the account: read from it instead.
+          note(s, `following ${l.holder}`);
+          setState({ following: s.url });
+          void pull(s, true);
+        } else schedulePull(s, 0);
+      }
     } catch (e) {
       note(s, `lease failed: ${e}`);
     }
@@ -349,6 +376,7 @@ export function startRecordSync() {
 }
 
 export async function stopRecordSync() {
+  if (getState().following) setState({ following: null });
   if (leaseTimer) clearInterval(leaseTimer);
   leaseTimer = null;
   unsubscribe?.();

@@ -44,7 +44,7 @@ at all. Two parts:
 | Exchange | `server/src/api.rs`, `crates/vfm-share` | Items of kind `friends`, `activity`, `self`. Signed, optionally end-to-end encrypted (X25519 + XChaCha20-Poly1305) per recipient; the server stores ciphertext. `self` carries circles, notes and settings to your own devices. |
 | Live notices | `GET /v1/events` (SSE) | Tells apps that something changed (inbox, device signals). |
 | Logger | `server/src/logger.rs` | One owner per server. Holds a VRChat session, keeps VRChat's pipeline open, counts time together, pushes invites to phones. |
-| Logger login | `POST /v1/logger/pair` (sealed from the app) or the admin page (`/admin/api/vrchat/login` + `2fa`) | The password is used once and never stored. Only the session cookies are kept. |
+| Logger login | `POST /v1/logger/pair` (sealed from the app) | Only the session cookies are kept. (The admin page's own VRChat login, username + password + 2FA typed in by the operator, was removed: it contradicts "no VRChat login on the server by default" and "the admin page never handles credentials".) |
 | Session at rest | `vfm-data/logger/session.json` | **Plain JSON, file mode 0600.** (TODO.md "Round 6" says "stored encrypted": only the transport from the app is sealed.) |
 | Hand-off | `[logger] hand_off`, `/v1/logger/heartbeat` | While the desktop app runs, the server lets go of the pipeline. |
 | App's own VRChat data | `src-tauri/src/api.rs`, `pipeline.rs`, `gamelogs.rs`, `livelog.rs` | Friends, profiles, mutuals, favorites, groups, instances via the API; live events via the pipeline; game logs where the app can read them (PC; Android with root; Shizuku planned). All kept locally, as whole JSON files. |

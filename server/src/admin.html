@@ -90,19 +90,8 @@
     </section>
 
     <section>
-      <h2>This server's own VRChat login</h2>
-      <p class="hint">Your own account only. The server keeps VRChat's live connection around the clock: invites go to your phone (UnifiedPush) and friends' locations are logged with your PC off. VRChat may end the session now and then; log in here again then. Logging in from a server's address can make VRChat ask for an email code.</p>
-      <form id="vrcLogin" class="grid">
-        <div><label>VRChat username or email</label><input name="username" autocomplete="off"></div>
-        <div><label>Password</label><input name="password" type="password" autocomplete="off"></div>
-        <div style="align-self:end"><button>Log in to VRChat</button></div>
-      </form>
-      <form id="vrc2fa" class="row hidden" style="margin-top:10px">
-        <select name="method" style="width:auto"></select>
-        <input name="code" placeholder="2FA code" style="width:160px" autocomplete="one-time-code">
-        <button>Confirm</button>
-      </form>
-      <span id="vrcMsg"></span>
+      <h2>Logger's live connection</h2>
+      <p class="hint">The logger uses the VRChat session of the account that paired it, sent sealed from that person's app (Settings → Servers → this server → Pair logger). This page never takes VRChat logins.</p>
       <label style="margin-top:12px"><input type="checkbox" id="handOff" style="width:auto"> Hand off to my PC: while my PC app runs (with its live connection), the server lets go and takes over again a few minutes after the PC app closes</label>
       <p class="hint" id="pushHint"></p>
     </section>
@@ -272,7 +261,7 @@ async function load() {
   const c = s.cache || {};
   $("#cacheStats").textContent = ["world", "group", "avatar"].map((k) => `${c[k]?.entries ?? 0} ${k}s`).join(" · ");
   $("#handOff").checked = !!s.settings.handOff;
-  $("#pushHint").textContent = L.paired ? `${L.handedOff ? "Handed off to your PC right now. " : ""}Phones taking pushes: ${L.pushTargets ?? 0} (set up in the app on the phone: Settings → Phone in the background → Push).${L.waitingFor2fa ? " A login is waiting for its 2FA code." : ""}` : "";
+  $("#pushHint").textContent = L.paired ? `${L.handedOff ? "Handed off to your PC right now. " : ""}Phones taking pushes: ${L.pushTargets ?? 0} (set up in the app on the phone: Settings → Phone in the background → Push).` : "";
   const b = s.bans || { users: {}, ips: {} };
   const banRows = [...Object.entries(b.users).map(([v, x]) => ["user", v, x]), ...Object.entries(b.ips).map(([v, x]) => ["ip", v, x])];
   $("#bans").innerHTML = banRows.map(([k, v, x]) => `<tr><td class="mono">${esc(v)} <span class="pill">${k === "ip" ? "IP" : "account"}</span></td><td>${esc(x.reason) || '<span class="dim">no reason</span>'}</td><td>${ago(x.t)}${x.by ? ` <span class="dim">by ${esc(x.by)}</span>` : ""}</td><td><button class="ghost" data-unban="${k}/${esc(v)}">Unban</button></td></tr>`).join("") || `<tr><td colspan=4 class="dim">Nobody is banned.</td></tr>`;
@@ -357,31 +346,6 @@ $("#adminForm").onsubmit = async (e) => {
   } catch (err) { alert(err.message); }
 };
 $("#handOff").onchange = async (e) => { await api("/admin/api/settings", { method: "POST", body: JSON.stringify({ handOff: e.target.checked }) }); load(); };
-$("#vrcLogin").onsubmit = async (e) => {
-  e.preventDefault();
-  const f = e.target;
-  $("#vrcMsg").textContent = "Logging in…"; $("#vrcMsg").className = "dim";
-  try {
-    const r = await api("/admin/api/vrchat/login", { method: "POST", body: JSON.stringify({ username: f.username.value, password: f.password.value }) });
-    f.password.value = "";
-    if (r.needs && r.needs.length) {
-      const labels = { totp: "Authenticator code", otp: "Recovery code", emailOtp: "Code from email" };
-      $("#vrc2fa").method.innerHTML = r.needs.map((m) => `<option value="${esc(m)}">${esc(labels[m] || m)}</option>`).join("");
-      $("#vrc2fa").classList.remove("hidden");
-      $("#vrcMsg").textContent = "VRChat asks for a 2FA code."; $("#vrcMsg").className = "warn";
-    } else { $("#vrcMsg").textContent = "Logged in. The server connects now."; $("#vrcMsg").className = "ok"; load(); }
-  } catch (err) { $("#vrcMsg").textContent = err.message; $("#vrcMsg").className = "bad"; }
-};
-$("#vrc2fa").onsubmit = async (e) => {
-  e.preventDefault();
-  const f = e.target;
-  try {
-    await api("/admin/api/vrchat/2fa", { method: "POST", body: JSON.stringify({ method: f.method.value, code: f.code.value }) });
-    f.code.value = ""; f.classList.add("hidden");
-    $("#vrcMsg").textContent = "Logged in. The server connects now."; $("#vrcMsg").className = "ok"; load();
-  } catch (err) { $("#vrcMsg").textContent = err.message; $("#vrcMsg").className = "bad"; }
-};
-
 if (token || session) load().catch(() => {});
 else lock("");
 </script>

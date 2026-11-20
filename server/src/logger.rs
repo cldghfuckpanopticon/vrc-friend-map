@@ -118,8 +118,6 @@ struct Inner {
     handed_off: bool,
     /// The owner's phones in push mode (UnifiedPush endpoint + key).
     push: PushTargets,
-    /// A dashboard login waiting for its 2FA code.
-    pending: Option<Session>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -321,97 +319,6 @@ impl Logger {
         eprintln!("logger unpaired{}", if forget { " and history deleted" } else { "" });
     }
 
-    // ---------- logging in from the admin page ----------
-
-    async fn post_json(&self, s: Option<&Session>, path: &str, body: &Value, basic: Option<String>) -> Result<(u16, Value, Vec<String>), String> {
-        let mut req = self
-            .http
-            .request(if path == "/auth/user" { reqwest::Method::GET } else { reqwest::Method::POST }, format!("{API}{path}"))
-            .header(reqwest::header::USER_AGENT, &self.ua)
-            .header(reqwest::header::ACCEPT, "application/json");
-        if let Some(s) = s {
-            req = req.header(reqwest::header::COOKIE, Self::cookie(s));
-        }
-        if let Some(b) = basic {
-            req = req.header(reqwest::header::AUTHORIZATION, b);
-        }
-        if path != "/auth/user" {
-            req = req.json(body);
-        }
-        let res = req.send().await.map_err(|e| e.to_string())?;
-        let status = res.status().as_u16();
-        let cookies: Vec<String> = res.headers().get_all(reqwest::header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok().map(str::to_string)).collect();
-        let body = res.json::<Value>().await.unwrap_or(Value::Null);
-        Ok((status, body, cookies))
-    }
-
-    fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
-        cookies.iter().find_map(|c| {
-            let first = c.split(';').next()?.trim();
-            let (k, v) = first.split_once('=')?;
-            (k == name && !v.is_empty()).then(|| v.to_string())
-        })
-    }
-
-    /// Log in with username and password (admin page only). Returns the 2FA
-    /// methods VRChat asks for, or an empty list when it's done.
-    pub async fn login_password(self: &Arc<Self>, username: &str, password: &str) -> Result<Vec<String>, String> {
-        fn enc(s: &str) -> String {
-            s.bytes()
-                .map(|b| match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-                    _ => format!("%{b:02X}"),
-                })
-                .collect()
-        }
-        use crate::push::b64_encode as encode;
-        let basic = format!("Basic {}", encode(format!("{}:{}", enc(username.trim()), enc(password)).as_bytes()));
-        let (status, me, cookies) = self.post_json(None, "/auth/user", &Value::Null, Some(basic)).await?;
-        if status == 401 {
-            return Err("VRChat says the username or password is wrong".into());
-        }
-        if status == 429 {
-            return Err("VRChat says too many tries; wait a while".into());
-        }
-        let auth = Self::cookie_value(&cookies, "auth").ok_or_else(|| format!("VRChat didn't start a session ({status})"))?;
-        let session = Session { auth, two_factor: None };
-        if let Some(methods) = me.get("requiresTwoFactorAuth").and_then(Value::as_array) {
-            let m: Vec<String> = methods.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
-            self.inner.lock().unwrap().pending = Some(session);
-            return Ok(m);
-        }
-        self.finish_login(session).await?;
-        Ok(vec![])
-    }
-
-    /// The 2FA code for a waiting login: "totp" (authenticator app), "otp" (recovery code) or "emailOtp".
-    pub async fn login_2fa(self: &Arc<Self>, method: &str, code: &str) -> Result<(), String> {
-        let session = self.inner.lock().unwrap().pending.clone().ok_or("no login is waiting for a code")?;
-        let path = match method {
-            "totp" => "/auth/twofactorauth/totp/verify",
-            "otp" => "/auth/twofactorauth/otp/verify",
-            "emailOtp" => "/auth/twofactorauth/emailotp/verify",
-            _ => return Err("unknown 2FA method".into()),
-        };
-        let (status, body, cookies) = self.post_json(Some(&session), path, &json!({ "code": code.trim() }), None).await?;
-        if status != 200 || body.get("verified").and_then(Value::as_bool) == Some(false) {
-            return Err("VRChat didn't accept that code".into());
-        }
-        let two = Self::cookie_value(&cookies, "twoFactorAuth");
-        let session = Session { auth: session.auth, two_factor: two };
-        self.inner.lock().unwrap().pending = None;
-        self.finish_login(session).await
-    }
-
-    async fn finish_login(self: &Arc<Self>, session: Session) -> Result<(), String> {
-        let (status, me) = self.get(&session, "/auth/user").await?;
-        let id = me.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-        if status != 200 || id.is_empty() {
-            return Err(format!("VRChat didn't return the account ({status})"));
-        }
-        self.pair(&id, &session.auth, session.two_factor.clone()).await
-    }
-
     // ---------- hand-off to the owner's PC ----------
 
     /// The owner's PC app is running with its own live connection.
@@ -515,7 +422,6 @@ impl Logger {
             "handedOff": g.handed_off,
             "pcHeartbeat": g.pc_heartbeat,
             "pushTargets": g.push.targets.len(),
-            "waitingFor2fa": g.pending.is_some(),
         })
     }
 

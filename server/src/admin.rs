@@ -38,8 +38,6 @@ pub fn router() -> Router<Arc<App>> {
         .route("/admin/api/admins/{name}", delete(remove_admin))
         .route("/admin/api/bans", get(list_bans).post(add_ban))
         .route("/admin/api/bans/{kind}/{value}", delete(remove_ban))
-        .route("/admin/api/vrchat/login", post(vrchat_login))
-        .route("/admin/api/vrchat/2fa", post(vrchat_2fa))
 }
 
 pub fn lan(ip: IpAddr) -> bool {
@@ -241,41 +239,6 @@ async fn remove_ban(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<
         return r;
     }
     match app.bans.remove(&kind, &value) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => bad(e),
-    }
-}
-
-#[derive(Deserialize)]
-struct VrcLoginBody {
-    username: String,
-    password: String,
-}
-
-/// The server's own VRChat login (the owner's account), only from this page.
-async fn vrchat_login(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(r) = check(&app, &addr, &headers) {
-        return r;
-    }
-    let Ok(b) = serde_json::from_slice::<VrcLoginBody>(&body) else { return bad("username and password needed") };
-    match app.logger.login_password(&b.username, &b.password).await {
-        Ok(needs) => Json(json!({ "ok": true, "needs": needs })).into_response(),
-        Err(e) => bad(e),
-    }
-}
-
-#[derive(Deserialize)]
-struct TwoFaBody {
-    method: String,
-    code: String,
-}
-
-async fn vrchat_2fa(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(r) = check(&app, &addr, &headers) {
-        return r;
-    }
-    let Ok(b) = serde_json::from_slice::<TwoFaBody>(&body) else { return bad("method and code needed") };
-    match app.logger.login_2fa(&b.method, &b.code).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(e) => bad(e),
     }

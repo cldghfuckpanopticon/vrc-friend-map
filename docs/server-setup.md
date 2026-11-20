@@ -271,12 +271,9 @@ Only on a server **you** run (see the privacy note in step 1).
 
 To stop, use **Unpair (keep history)** or **Unpair and delete history**.
 
-**Or log in on the admin page.** Under *This server's own VRChat login*, enter your VRChat username, password
-and then the 2FA code. The server gets a VRChat session of its own and keeps the live
-connection open around the clock, so invites and friend events reach your phone as push even
-with the PC off. Only your own account belongs there; the app can't set it, and nobody else
-using the server gets near it. VRChat ends sessions now and then: then log in there again. A
-server's address can also trigger VRChat's security checks.
+Pairing is the only way to give the logger a VRChat session: the admin page never takes
+VRChat logins. VRChat ends sessions now and then: then pair again from the app. A server's
+address can also trigger VRChat's security checks.
 
 **Hand-off** (`hand_off = true` under `[logger]`, the default): while your PC app runs, the
 server lets go of VRChat's live connection and the PC app takes over, so VRChat doesn't see you
@@ -362,6 +359,6 @@ The app shows in the server's card when it's older than the app.
 | Lost the admin token | `vfm-server token` shows it; `vfm-server token --new` replaces it. |
 | Lost an admin password or authenticator | Open the admin page with the admin token (*Use the admin token instead*) and remove and re-add that admin, or have another admin do it. |
 | "Setup code wrong or expired" | Codes last 30 minutes and work once. Run `vfm-server admin-code` again. |
-| Logger says the VRChat login expired | Log in again on the admin page under *This server's own VRChat login* (or pair again from the app). |
+| Logger says the VRChat login expired | Pair again from the app (Settings → Servers → this server → Pair logger). |
 
 Back up `vfm-server.toml` and the `vfm-data/` folder (the `vfm-data` volume in a container).

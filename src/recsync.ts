@@ -337,6 +337,9 @@ export function startRecordSync() {
     lastCache = c;
     for (const s of recordServers()) if (run(s).held) schedulePush(s);
   });
+  // Without a VRChat login the sharing code (which keeps the servers' live streams
+  // open) doesn't run, so open them here.
+  if (getState().serverOnly) void backend.share.watch(recordServers().map((s) => s.url)).catch(() => {});
   void backend.records
     .onChanged((e) => {
       const s = recordServers().find((x) => x.url === e.url);
@@ -352,6 +355,7 @@ export async function stopRecordSync() {
   unsubscribe = null;
   unlisten?.();
   unlisten = null;
+  if (getState().serverOnly) void backend.share.watch([]).catch(() => {});
   const servers = getState().settings.sharing.servers;
   for (const [sid, r] of runs) {
     clearTimeout(r.pushTimer);

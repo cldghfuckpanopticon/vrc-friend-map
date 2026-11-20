@@ -28,6 +28,7 @@ export function serverRoles(s: ShareServer): string[] {
   if (s.upload && (s.shareFriends || s.shareActivity)) out.push("You share");
   if (s.download) out.push("Friends share with you");
   if (s.syncMine) out.push("Your devices");
+  if (s.syncAll) out.push("All your data");
   if (s.loggerOwner) out.push("Logs 24/7");
   return out;
 }

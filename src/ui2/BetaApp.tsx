@@ -29,6 +29,7 @@ import { LogbookView } from "../components/LogbookView";
 import { SharedLists } from "../components/SharedLists";
 import { SyncLogDialog } from "../components/SyncLogDialog";
 import { FilterPopover, SyncPill } from "../components/TopBar";
+import { ServerOnlyBar } from "../components/ServerOnlyBar";
 import { VrchatView } from "../components/VrchatView";
 import { CommandPalette } from "./CommandPalette";
 import "./ui2.css";
@@ -124,6 +125,7 @@ function DesktopShell({ onPalette }: { onPalette: () => void }) {
         </button>
       </nav>
       <main className="ui2-main">
+        <ServerOnlyBar />
         <FloatingBar onPalette={onPalette} />
         <div className="ui2-content">
           {view === "graph" && <div className="ui2-here-float"><HereNow /></div>}
@@ -244,6 +246,7 @@ function PhoneShell() {
           <Icon name="settings" />
         </button>
       </header>
+      <ServerOnlyBar />
       <main className="ui2-phone-main">
         {page === "here" ? <HerePage /> : page === "me" ? <MePage onOpen={(v) => go(v)} /> : <ViewBody view={view} />}
       </main>

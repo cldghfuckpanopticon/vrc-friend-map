@@ -236,6 +236,15 @@ export function ServerSettings({ server: s }: { server: ShareServer }) {
           <Section icon="desktop" title="My other devices" help="Your circles, notes, stars and nicknames, encrypted for you only; the server can't read them.">
             <Check id={`me-${s.id}`} checked={s.syncMine} onChange={(v) => set({ syncMine: v })} label="Sync my devices through this server" />
             {s.syncMine && s.info?.deviceRelay && <MyDevices url={s.url} />}
+            {s.info?.recordSync && (
+              <Check
+                id={`all-${s.id}`}
+                checked={s.syncAll}
+                onChange={(v) => set({ syncAll: v })}
+                label="Sync all my data through this server (beta)"
+                hint="Friends, profiles, statuses and the rest from VRChat, encrypted for you, so your other devices show them even without a VRChat login (login screen: Use my data from a server). One logged-in device sends it at a time, a computer before a phone."
+              />
+            )}
           </Section>
 
           {info?.loggerEnabled && (

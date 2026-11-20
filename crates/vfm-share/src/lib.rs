@@ -17,6 +17,7 @@ pub mod auth;
 mod envelope;
 mod identity;
 mod policy;
+pub mod records;
 
 pub use envelope::{open_sealed_box, seal_box, Enc, Envelope, OpenError, Recipient};
 pub use identity::{fingerprint, Identity, PublicIdentity};

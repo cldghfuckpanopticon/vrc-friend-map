@@ -12,6 +12,7 @@ mod config;
 mod logger;
 mod push;
 mod store;
+mod sync;
 mod upgrade;
 mod updates;
 
@@ -196,9 +197,11 @@ fn run(config_path: &Path) -> Result<(), String> {
         }
     }
 
+    let sync_db = sync::SyncDb::open(&cfg.data_dir(config_path))?;
+
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async move {
-        let app = api::App::new(cfg.clone(), config_path.to_path_buf(), store, Arc::clone(&lg), env_used.iter().map(|s| s.to_string()).collect());
+        let app = api::App::new(cfg.clone(), config_path.to_path_buf(), store, Arc::clone(&lg), env_used.iter().map(|s| s.to_string()).collect(), sync_db);
         lg.spawn_ticker();
         if cfg.logger.enabled && lg.has_session() {
             lg.start();
@@ -210,6 +213,18 @@ fn run(config_path: &Path) -> Result<(), String> {
             loop {
                 iv.tick().await;
                 flush_app.store.lock().unwrap().flush();
+            }
+        });
+        let cleanup_app = Arc::clone(&app);
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            loop {
+                iv.tick().await;
+                let app = Arc::clone(&cleanup_app);
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                if let Ok(Err(e)) = tokio::task::spawn_blocking(move || app.sync.cleanup(now)).await {
+                    eprintln!("sync cleanup failed: {e}");
+                }
             }
         });
         let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("can't listen on {listen}: {e}"))?;

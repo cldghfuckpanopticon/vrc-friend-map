@@ -35,6 +35,8 @@ pub struct App {
     pub admins: crate::admins::Admins,
     pub bans: crate::bans::Bans,
     pub cache: crate::cache::Cache,
+    /// Record sync and leases (`/v1/sync`, `/v1/lease`).
+    pub sync: crate::sync::SyncDb,
     /// The newest vfm-server release, if checking is on.
     pub updates: crate::updates::Updates,
     /// Item changes and messages between someone's own devices, for the open
@@ -51,6 +53,8 @@ pub enum Signal {
     Change(Change),
     /// A sealed message from one of `user`'s devices to their others. Never stored.
     Peer { user: String, blob: Arc<String> },
+    /// `user`'s records changed; their devices sync up to `seq`.
+    Sync { user: String, seq: u64 },
 }
 
 /// Messages between your own devices up to this size always go through (devices
@@ -79,7 +83,7 @@ impl Change {
 const MAX_STREAMS: usize = 2000;
 
 impl App {
-    pub fn new(cfg: Config, cfg_path: PathBuf, store: Store, logger: Arc<Logger>, env_locked: Vec<String>) -> Arc<App> {
+    pub fn new(cfg: Config, cfg_path: PathBuf, store: Store, logger: Arc<Logger>, env_locked: Vec<String>, sync: crate::sync::SyncDb) -> Arc<App> {
         let dir = store.dir.clone();
         logger.hand_off.store(cfg.logger.hand_off, std::sync::atomic::Ordering::SeqCst);
         Arc::new(App {
@@ -92,6 +96,7 @@ impl App {
             admins: crate::admins::Admins::new(&dir),
             bans: crate::bans::Bans::new(&dir),
             cache: crate::cache::Cache::new(&dir),
+            sync,
             updates: Default::default(),
             changes: tokio::sync::broadcast::channel(64).0,
             streams: std::sync::atomic::AtomicUsize::new(0),
@@ -156,7 +161,13 @@ impl App {
             kinds: KINDS.iter().map(|k| k.to_string()).collect(),
             logger: LoggerInfo { enabled: cfg.logger.enabled, paired: self.logger.owner().is_some(), owner: None },
             motd: cfg.server.motd.clone(),
-            features: vec!["hidden-recipients".into(), "live-changes".into(), "device-relay".into()],
+            features: vec![
+                "hidden-recipients".into(),
+                "live-changes".into(),
+                "device-relay".into(),
+                vfm_share::records::FEATURE_SYNC.into(),
+                vfm_share::records::FEATURE_LEASE.into(),
+            ],
         }
     }
 }
@@ -264,6 +275,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/hidden", post(hidden))
         .route("/v1/events", get(events))
         .route("/v1/devices/signal", post(device_signal))
+        .route("/v1/sync", post(sync))
+        .route("/v1/lease", post(lease))
         .route("/v1/logger/pair", post(logger_pair).delete(logger_unpair))
         .route("/v1/logger/status", get(logger_status))
         .route("/v1/logger/stats", get(logger_stats))
@@ -464,6 +477,7 @@ async fn delete_me(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
         app.logger.unpair(false);
     }
     app.store.lock().unwrap().delete_user(&user);
+    app.sync.delete_account(&user);
     eprintln!("account deleted: {user}");
     Ok(Json(json!({ "ok": true })).into_response())
 }
@@ -712,6 +726,10 @@ async fn events(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
                         let line = format!("event: peer\ndata: {}\n\n", json!({ "blob": blob.as_str() }));
                         return Some((Ok(Bytes::from(line)), (rx, tick, user, open, closing)));
                     }
+                    Ok(Signal::Sync { user: u, seq }) if u == user => {
+                        let line = format!("event: sync\ndata: {}\n\n", json!({ "seq": seq }));
+                        return Some((Ok(Bytes::from(line)), (rx, tick, user, open, closing)));
+                    }
                     Ok(_) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         return Some((Ok(Bytes::from_static(b"event: resync\ndata: {}\n\n")), (rx, tick, user, open, closing)));
@@ -731,6 +749,45 @@ async fn events(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
         axum::body::Body::from_stream(stream),
     )
         .into_response())
+}
+
+// ---------- record sync ----------
+
+/// Decompressed size accepted for one sync request.
+const MAX_SYNC_BODY: usize = 64 * 1024 * 1024;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// `POST /v1/sync`: CBOR + zstd both ways (`vfm_share::records`).
+async fn sync(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, uri: Uri, body: Bytes) -> ApiResult {
+    let user = authed(&app, &headers, &method, &uri, &body)?;
+    let ct = headers.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if ct != vfm_share::records::CONTENT_TYPE {
+        return Err(err(StatusCode::UNSUPPORTED_MEDIA_TYPE, format!("send {}", vfm_share::records::CONTENT_TYPE)));
+    }
+    let req: vfm_share::records::SyncRequest = vfm_share::records::decode(&body, MAX_SYNC_BODY).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let worker = Arc::clone(&app);
+    let account = user.clone();
+    let (res, stored) = tokio::task::spawn_blocking(move || worker.sync.sync(&account, &req, now_ms()))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    if stored {
+        let _ = app.changes.send(Signal::Sync { user, seq: res.seq });
+    }
+    Ok(([(axum::http::header::CONTENT_TYPE, vfm_share::records::CONTENT_TYPE)], vfm_share::records::encode(&res)).into_response())
+}
+
+/// `POST /v1/lease`: take, renew or release the account's lease (JSON).
+async fn lease(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, uri: Uri, body: Bytes) -> ApiResult {
+    let user = authed(&app, &headers, &method, &uri, &body)?;
+    let req: vfm_share::records::LeaseRequest = serde_json::from_slice(&body).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if !vfm_share::records::valid_source(&req.device) || !matches!(req.action.as_str(), "take" | "release") {
+        return Err(err(StatusCode::BAD_REQUEST, "device and action (take / release) needed"));
+    }
+    Ok(Json(app.sync.lease(&user, &req, now_ms())).into_response())
 }
 
 // ---------- logger ----------

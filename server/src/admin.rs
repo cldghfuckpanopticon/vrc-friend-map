@@ -309,8 +309,10 @@ async fn status(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Sock
                 .filter(|m| m.owner == u.identity.user_id)
                 .map(|m| json!({ "kind": m.kind, "sealed": m.sealed, "recipients": m.recipients.len(), "bytes": m.bytes, "created": m.created }))
                 .collect();
-            let bytes: usize = store.items.values().filter(|m| m.owner == u.identity.user_id).map(|m| m.bytes).sum();
+            let (records, record_bytes) = app.sync.usage(&u.identity.user_id);
+            let bytes: usize = store.items.values().filter(|m| m.owner == u.identity.user_id).map(|m| m.bytes).sum::<usize>() + record_bytes as usize;
             json!({
+                "records": records,
                 "id": u.identity.user_id, "name": u.name, "fingerprint": u.identity.fingerprint(), "registered": u.registered,
                 "lastSeen": u.last_seen, "invite": u.invite, "items": mine, "lastIp": u.last_ip, "app": u.last_ua, "bytes": bytes,
                 "banned": app.bans.user(&u.identity.user_id).map(|b| b.reason),
@@ -497,6 +499,7 @@ async fn delete_user(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo
         app.logger.unpair(false);
     }
     let removed = app.store.lock().unwrap().delete_user(&id);
+    app.sync.delete_account(&id);
     Json(json!({ "ok": true, "removed": removed })).into_response()
 }
 

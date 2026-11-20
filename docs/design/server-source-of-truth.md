@@ -17,15 +17,15 @@ at all. Two parts:
     change sequence per account. Every device reads only from the server, so all devices see the
     same thing.
   - **Authority: per fact, by richness.** Each record is an observation by one producer (the
-    agent, a device's API connection, a PC's game log). Different producers write different
+    agent, a device's API connection, a VRChat client's game log). Different producers write different
     records; the app combines them with a fixed order of which source wins for which fact
     (see "Authority").
 - **Default: no VRChat login on the server.** The client is the only source of truth for API
   data: the device holding the account's lease fetches it and uploads all of it, end-to-end
   encrypted; every other device of the account (a phone without a VRChat login) sees all of it.
 - **Optional, per account: an agent** (the account gives the server a VRChat session): it produces
-  everything VRChat's API can give, 24/7, from one stable IP. Devices never talk to VRChat. A PC
-  running VRChat adds what only the game log knows.
+  everything VRChat's API can give, 24/7, from one stable IP. Devices never talk to VRChat. A VRChat
+  client (see Terms) adds what only the game log knows.
 - **Data is records**, in collections that mirror what the app stores today, with a versioned
   schema shared by app and server, per-account sequence numbers so devices only move what
   changed, stored in **SQLite**.
@@ -46,8 +46,8 @@ at all. Two parts:
 | Logger | `server/src/logger.rs` | One owner per server. Holds a VRChat session, keeps VRChat's pipeline open, counts time together, pushes invites to phones. |
 | Logger login | `POST /v1/logger/pair` (sealed from the app) or the admin page (`/admin/api/vrchat/login` + `2fa`) | The password is used once and never stored. Only the session cookies are kept. |
 | Session at rest | `vfm-data/logger/session.json` | **Plain JSON, file mode 0600.** (TODO.md "Round 6" says "stored encrypted": only the transport from the app is sealed.) |
-| Hand-off | `[logger] hand_off`, `/v1/logger/heartbeat` | While the PC app runs, the server lets go of the pipeline. |
-| App's own VRChat data | `src-tauri/src/api.rs`, `pipeline.rs`, `gamelogs.rs`, `livelog.rs` | Friends, profiles, mutuals, favorites, groups, instances via the API; live events via the pipeline; game logs on the PC. All kept locally, as whole JSON files. |
+| Hand-off | `[logger] hand_off`, `/v1/logger/heartbeat` | While the desktop app runs, the server lets go of the pipeline. |
+| App's own VRChat data | `src-tauri/src/api.rs`, `pipeline.rs`, `gamelogs.rs`, `livelog.rs` | Friends, profiles, mutuals, favorites, groups, instances via the API; live events via the pipeline; game logs where the app can read them (PC; Android with root; Shizuku planned). All kept locally, as whole JSON files. |
 
 What a server can't do today: give a second device the friends, profiles and history that the
 first device fetched. Each device fetches everything from VRChat itself and needs its own
@@ -55,9 +55,20 @@ VRChat login. The logger's time-together totals are the only thing that flows ba
 
 ## Part 1: source of truth
 
+### Terms
+
+- **Account**: one VRChat account (`usr_…`) on a server. Its devices share the app key.
+- **Device**: an install of the app (desktop, phone, tablet).
+- **VRChat client**: a device where VRChat itself runs *and* the app can read its log (and OSC):
+  a PC, or an Android device running VRChat (a phone, a Quest) where the app reads the log
+  through root (Shizuku planned). Not "the PC": any of them, several at once.
+- **Agent**: the server acting for one account with that account's VRChat session (opt-in).
+- **Producer**: whatever writes a record: a device's API connection, a VRChat client's game
+  log, the agent, or the person editing something.
+
 ### Who can observe what
 
-| Fact | VRChat API / pipeline (agent or a device) | PC game log / OSC (only a PC running VRChat) | Written by the person (any device) |
+| Fact | VRChat API / pipeline (agent or a device) | Game log / OSC (only a VRChat client) | Written by the person (any device) |
 |---|---|---|---|
 | Friends list, profiles, mutuals, favorites, groups, worlds, notifications | ✔ | | |
 | A friend's status and location | ✔, but private / invite-only instances are hidden | ✔ when they're in *your* instance, private included | |
@@ -75,8 +86,8 @@ everything else and the only one that can run 24/7.
 - Devices read **only** from the server and write their observations **to** it. A device's
   local files become a cache of the server's state (plus the few things that never leave the
   device).
-- So any device sees everything any producer of the account has seen: a phone shows the PC's
-  game-log history, the agent's friends list, and the circles edited on a laptop.
+- So any device sees everything any producer of the account has seen: a phone shows a VRChat
+  client's game-log history, the agent's friends list, and the circles edited on a laptop.
 
 ### Producers, and one VRChat connection per account
 
@@ -84,33 +95,33 @@ everything else and the only one that can run 24/7.
 |---|---|---|
 | **A device's API connection** | API facts | **Default** (no agent): the device holding the account's **lease** |
 | **Agent** (server, per account, opt-in) | API facts | Only if the account set one up: then always (it holds the account's lease permanently) |
-| **A PC's game log / OSC** | Game-log facts | Whenever VRChat runs on that PC. Not leased: each PC writes its own records |
+| **A VRChat client's game log / OSC** | Game-log facts | Whenever VRChat runs there and the app can read its log. Not leased: each VRChat client writes its own records |
 | **Any device** | The person's own data | When the person edits something |
 
 The **lease** (`POST /v1/lease`, one minute, renewed every minute, given up on exit) makes sure
 VRChat sees one live connection per account. With an agent, the agent keeps it and devices never
 open a VRChat connection: one session, one stable IP, no handovers, no gaps. Without an agent,
-the first live device takes it (PC first, then a phone) and hands over when it stops renewing.
+the first live device takes it (a desktop first, then a phone) and hands over when it stops renewing.
 This replaces today's heartbeat hand-off.
 
 ### Authority: which observation wins
 
 Different producers **never write the same record**. The API's view of a friend's location is
-`presence/usr_x` from the agent; the PC log's sighting of that friend is a `visits` record from
-that PC. Storage therefore has no conflicts between sources; authority is applied when the app
+`presence/usr_x` from the agent; a VRChat client's sighting of that friend is a `visits` record
+from that client. Storage therefore has no conflicts between sources; authority is applied when the app
 combines records into what it shows:
 
 | Shown | Built from | Rule |
 |---|---|---|
 | Friends list, profiles, mutuals, favorites, groups, worlds | API records | only source |
-| A friend's current location | `presence` (API) + `live` (PC: who's in your instance now) | `live` wins while fresh (it sees private instances); otherwise `presence` |
-| Your own current location | `me` (API) + `live` | `live` wins while VRChat runs on a PC |
+| A friend's current location | `presence` (API) + `live` (VRChat client: who's in your instance now) | `live` wins while fresh (it sees private instances); otherwise `presence` |
+| Your own current location | `me` (API) + `live` | `live` wins while a VRChat client runs |
 | Who you were with, history of an instance | `visits` | only source |
-| Time together | `presence` history (API, 24/7) + `visits` (PC) | `visits` wins for the time spans it covers (exact, private included); `presence` fills the rest |
+| Time together | `presence` history (API, 24/7) + `visits` (VRChat clients) | `visits` wins for the time spans it covers (exact, private included); `presence` fills the rest |
 | Circles, notes, settings | person records | newest change wins, per field |
 
 Each record carries `source` and `observed_at`, so the app can also say where and when something
-came from ("from your server, 2 min ago", "from your PC's game log").
+came from ("from your server, 2 min ago", "from your Quest's game log").
 
 Derived data (time together, suggested groups, stats) is computed on each device from these
 records and is not synced, so two producers can never disagree about it.
@@ -125,26 +136,69 @@ app stores today:
 | Class | Collections (app source today) | Producer | Merge |
 |---|---|---|---|
 | **API** | `me`; `friends`, `presence` (by user); `profiles` (`Cache.details`); `mutuals`; `favorites`; `groups`; `worlds`; `others`; `moderations`; `userNotes`; `notifications`; `alts` | agent, or the lease holder | single producer: newest wins |
-| **Game log** | `visits` (`history.json`: one record per instance visit, with players, videos, screenshots, avatar switches); `live` (who's here now, one record per PC) | that PC | each PC its own records |
+| **Game log** | `visits` (`history.json`: one record per instance visit, with players, videos, screenshots, avatar switches); `live` (who's here now, one record per VRChat client) | that VRChat client | each client its own records |
 | **Yours** | `circles`, `imports`, `nicknames`, `starred`, `timezones`, `worldNotes`, `inviteTemplates`, `blockReasons`, `shareNotes`, `sharedCircles`, `dismissedGroups`, `slotWatch`, `pushTargets`, settings groups | any device | per field, newest wins (hybrid logical clock); deletes are tombstones |
 | **Logs** | `friendLog`, `activity` | agent, or the lease holder | append-only, union by entry ID |
 | **Never synced** | `ageNotes`, `ageHints`, `linkReads`, this device's push registration, graphics / frame rate / tray | n/a | stays on the device, as today |
 
 Pictures aren't synced: records hold VRChat's image URLs, as the cache does today.
 
-### Schema versioning
+### Versions and migrations
 
-- **Per collection, a schema version.** Every record carries `v`. The shared crate
-  (`crates/vfm-share`) defines one type per collection and version plus upgrade functions,
-  used by both the app and the server, so both agree on what "`profiles` v3" is.
-- **Forward compatible.** Readers keep fields they don't know and write them back, so an older
-  app never strips a newer app's data.
-- **Upgrades happen where the data can be read**: the apps upgrade end-to-end encrypted records
-  (re-written lazily, on next change); the server upgrades agent records and its own tables.
-- **Protocol version** in `/v1/info` (already `protocol: 1`) changes only for breaking changes.
-  The server states the oldest app version it works with and vice versa, and the app says "this
-  server needs a newer app" instead of failing (TODO.md "Compatibility").
-- **The server's database** has its own migration version (SQLite `user_version`).
+Forward compatibility carries most changes (adding a field needs no migration at all), but not
+renames, splits, changed meanings, new indexes or a new encryption scheme. Those need real
+migrations. The data sits in three layers, each with its own rules.
+
+**1. Record schemas** (what's inside a record; shared crate `crates/vfm-share`)
+
+- Every record carries its collection's schema version `v`. The crate has one type per
+  collection and version, plus an upgrade function `v → v+1`.
+- **Additive changes keep `v`**: a new optional field. Readers keep fields they don't know and
+  write them back, so an older app never strips a newer app's data. Most changes are this.
+- **Breaking changes bump `v`**: rename, changed meaning, splitting a collection. Readers
+  upgrade on read.
+- **Write the newest version only when every device of the account can read it.** Each device
+  sends the schema versions it understands with every sync; the server keeps, per account and
+  collection, the lowest one among devices seen in the last 90 days and tells producers "write
+  at most `v`". An old phone that hasn't updated keeps working; the new version is written once
+  it updates (or drops out of the window).
+- **Who migrates stored records**: end-to-end encrypted records can only be upgraded by the
+  apps, lazily when the record is next written, or by one device in a background pass once
+  every device supports the new version. Agent records are upgraded by the server, in the
+  background, in batches.
+- A record with a version newer than the app knows is shown as "update the app to see this"
+  and never overwritten.
+- Renaming or replacing a collection: write the new one, keep the old one readable for the
+  support window, then delete it.
+
+**2. The server's database** (SQLite)
+
+- Numbered, forward-only migrations compiled into the binary; the database's version in
+  `PRAGMA user_version`; each migration in one transaction.
+- **Automatic backup before migrating**: `VACUUM INTO vfm-data/backups/db-v<old>-<date>.sqlite`
+  (the last 3 kept). Rolling back a server update = start the old binary with that file.
+- A server never runs on a database newer than it knows; it stops with "this data was written
+  by vfm-server X.Y; update, or restore a backup", instead of guessing.
+- Long data rewrites (re-encoding all agent records) run in the background with a progress
+  marker; startup doesn't wait for them.
+- Changes apps depend on use **expand / contract**: one release adds the new shape and writes
+  both, a later one (after the support window) removes the old.
+- Every release adds a database snapshot to the test fixtures; tests migrate every past
+  version to the current one.
+- The first migration imports today's JSON files (accounts, items, invites, bans, logger) into
+  SQLite and moves the originals to `backups/`.
+
+**3. The protocol** (app ↔ server)
+
+- Additive API changes (new endpoints, optional fields) don't change the protocol version;
+  `/v1/info` lists **features** (`"sync1"`, `"lease1"`, `"agent1"`, …) and apps check for a
+  feature instead of comparing versions.
+- Breaking changes get a new protocol version; the server serves the previous one too for the
+  **support window: 90 days and at least two releases**.
+- `/v1/info` states the oldest app version the server works with and the app checks the oldest
+  server version it works with; outside that, the app says "this server needs a newer app" (or
+  "is too old for this app") and stops syncing with it, instead of failing in odd ways
+  (TODO.md "Compatibility").
 
 ### Change tracking
 
@@ -171,7 +225,7 @@ POST /v1/sync            (signed like every request today)
 - Producers send only records whose content changed (they compare hashes) and coalesce
   presence/location changes into one batch every few seconds.
 - The server rejects writes to API collections from anyone but the lease holder, and writes to
-  another PC's game-log records.
+  another VRChat client's game-log records.
 
 ### What it costs
 
@@ -282,7 +336,7 @@ Envelope encryption, like LUKS key slots:
 | **The account's devices** | attended, **default** | automatically when any of the account's devices connects (seconds, no typing) | nothing | DEK sealed to the account's app key (X25519, like `self` items); the device sends it back with `POST /v1/agent/unlock`. A phone with the app in the background is usually enough. |
 | **Passphrase** | attended, optional | typing it in the app or on the admin page | nothing, if strong | Argon2id-derived key. For when no device is around. |
 | **systemd credentials / TPM2** | unattended, opt-in | on boot | nothing without that machine | `systemd-creds encrypt --with-key=tpm2`, `LoadCredentialEncrypted=`; the key appears in `$CREDENTIALS_DIRECTORY` (non-swappable, only that service). |
-| **Kubernetes Secret / KMS** | unattended, opt-in | on pod start | nothing from the volume alone, *if* the Secret store is protected separately (etcd encryption with KMS, External Secrets / OpenBao) | Or OpenBao/Vault transit, so the key never reaches the pod. |
+| **Kubernetes Secret / KMS** | unattended, opt-in | on pod start | nothing from the volume alone, *if* the Secret store is protected separately (etcd encryption with KMS, External Secrets / OpenBao) | **One key per server**, created once by the operator and mounted as a file; each opted-in account's DEK is wrapped with it and stored in the database. The pod needs no Kubernetes API access (no service-account token, no RBAC): per-account Secrets would need get/create on Secrets in the namespace, which a compromised pod could abuse. Variant: OpenBao/Vault transit, so the key never enters the pod; the pod then logs in to OpenBao with a projected, audience-bound service-account token, still with no Kubernetes RBAC. |
 
 **Unattended slots are a reluctant opt-in, on two levels:**
 
@@ -370,14 +424,20 @@ Decided 2026-11-20:
    every account on a server (the owner isn't special), behind a red, boxed warning that must be
    acknowledged.
 3. **Sync everything**, as versioned records with per-account sequence numbers.
-4. **Schema versioned**: per collection and record, shared crate, forward compatible.
+4. **Versions and migrations**: forward compatible by default (additive changes need no
+   migration); breaking record changes bump the collection's schema version and are written
+   only once all of an account's devices read it; numbered SQLite migrations with an automatic
+   backup before each; protocol features in `/v1/info`, previous protocol served for 90 days /
+   two releases.
 5. **Storage: SQLite.**
 6. **Lease**: the agent holds it permanently when there is one; otherwise whoever is live.
 7. **Without an agent (the default), the client is the only source of truth** for API data; it
    uploads all of it, and every other device of the account sees it.
 8. **Key slots**: attended by default (the account's devices; passphrase optional); unattended
    (TPM / systemd credentials, Kubernetes / KMS) only as a reluctant opt-in by the operator *and*
-   the account holder, behind a red warning.
+   the account holder, behind a red warning. The unattended key is one per server, provided by
+   the operator (a mounted Secret or systemd credential): the server needs **no Kubernetes API
+   access** and no RBAC.
 
 Details to settle while implementing: the exact per-collection schemas, HLC format, one agent
 process for all accounts vs one per account, and tombstone retention.

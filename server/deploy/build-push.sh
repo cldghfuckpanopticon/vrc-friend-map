@@ -38,7 +38,7 @@ echo "→ Pushing"
 echo
 echo "✓ Pushed $IMAGE:$TAG (also :$CHANNEL)"
 if [ "$CHANNEL" = stage ]; then
-  echo "  Staging uses :stage: kubectl -n vfm-server rollout restart deploy/vfm-server-stage"
+  echo "  Staging uses :stage: kubectl -n vfm-server-staging rollout restart deploy/vfm-server"
 else
   echo "  Pin it in server/deploy/k8s/vfm-server.yaml:  image: $IMAGE:$TAG"
 fi

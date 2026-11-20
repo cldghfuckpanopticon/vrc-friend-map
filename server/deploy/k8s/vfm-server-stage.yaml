@@ -1,28 +1,37 @@
-# vfm-server STAGING, next to production in the same namespace.
+# vfm-server STAGING: the same resources as vfm-server.yaml (same names), in their own
+# namespace vfm-server-staging, so nothing is shared with production.
 #   kubectl apply -f server/deploy/k8s/vfm-server-stage.yaml
-# Everything here is named vfm-server-stage* and labelled app: vfm-server-stage, so it
-# never selects or touches the production pod (vfm-server.yaml). Same layout:
 #   - /v1/* and /   -> gateway-public   (stage.vfm.jaceee.com)
-#   - everything    -> gateway-internal (vfm-server-stage.internal.rune.local), /admin only there
-# gateway-public needs an HTTPS listener named stage-vfm-jaceee-com for stage.vfm.jaceee.com.
+#   - everything    -> gateway-internal (vfm-server-staging.internal.rune.local), /admin only there
+# gateway-public needs an HTTPS listener named stage-vfm-jaceee-com for stage.vfm.jaceee.com,
+# allowing routes from the vfm-server-staging namespace.
 #
 # Image: the :stage tag, from any branch (e.g. feat/record-sync):
 #   CHANNEL=stage server/deploy/build-push.sh
-#   kubectl -n vfm-server rollout restart deploy/vfm-server-stage
+#   kubectl -n vfm-server-staging rollout restart deploy/vfm-server
 #
-# Before applying (the namespace exists from vfm-server.yaml), its own admin token:
-#   kubectl -n vfm-server create secret generic vfm-server-stage-admin \
+# Before applying, the namespace and its own admin token:
+#   kubectl create namespace vfm-server-staging --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n vfm-server-staging create secret generic vfm-server-admin \
 #     --from-literal=VFM_ADMIN_TOKEN="$(openssl rand -hex 24)"
-# Admin page: https://vfm-server-stage.internal.rune.local/admin
+# Admin page: https://vfm-server-staging.internal.rune.local/admin
 
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vfm-server-staging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted   # the pod below meets "restricted"
+
+---
 # Settings, accounts, shared items, the server keys (server.key!) and the logger's
 # history live here, so they survive pod restarts/rollouts. Back this volume up:
 # losing server.key makes every app warn that the server's identity changed.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: vfm-server-stage-data
-  namespace: vfm-server
+  name: vfm-server-data
+  namespace: vfm-server-staging
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -33,18 +42,18 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vfm-server-stage
-  namespace: vfm-server
+  name: vfm-server
+  namespace: vfm-server-staging
 spec:
   replicas: 1                          # one data folder (RWO) and one VRChat logger session: stays at 1
   revisionHistoryLimit: 3
   strategy:
     type: Recreate                     # RWO volume can't be mounted by two pods at once
   selector:
-    matchLabels: { app: vfm-server-stage }
+    matchLabels: { app: vfm-server }
   template:
     metadata:
-      labels: { app: vfm-server-stage }
+      labels: { app: vfm-server }
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false        # no VFM_SERVER_* service env vars next to the app's own VFM_* settings
@@ -73,7 +82,7 @@ spec:
                                                # The server uses the first entry, which a client can prefill:
                                                # IP bans are best effort (account bans aren't affected)
             - name: VFM_ADMIN_TOKEN            # at least 16 characters
-              valueFrom: { secretKeyRef: { name: vfm-server-stage-admin, key: VFM_ADMIN_TOKEN } }
+              valueFrom: { secretKeyRef: { name: vfm-server-admin, key: VFM_ADMIN_TOKEN } }
             # Optional, fixed here instead of on the admin page (see server/README.md):
             # - { name: VFM_NAME, value: "My VRC Friend Map server" }
             # - { name: VFM_REGISTRATION, value: "invite" }     # open | invite | closed
@@ -99,16 +108,16 @@ spec:
               mountPath: /data
       volumes:
         - name: data
-          persistentVolumeClaim: { claimName: vfm-server-stage-data }
+          persistentVolumeClaim: { claimName: vfm-server-data }
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: vfm-server-stage
-  namespace: vfm-server
+  name: vfm-server
+  namespace: vfm-server-staging
 spec:
-  selector: { app: vfm-server-stage }
+  selector: { app: vfm-server }
   ports:
     - name: http
       port: 80
@@ -120,8 +129,8 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: vfm-server-stage-public
-  namespace: vfm-server                   # same namespace as the Service, so no ReferenceGrant is needed
+  name: vfm-server-public
+  namespace: vfm-server-staging                   # same namespace as the Service, so no ReferenceGrant is needed
   annotations:
     jaceee.dev/envoy-proxy-inject: "true"
 spec:
@@ -135,8 +144,8 @@ spec:
     # Live updates: a server-sent event stream that stays open, so no request timeout.
     - backendRefs:
         - kind: Service
-          name: vfm-server-stage
-          namespace: vfm-server
+          name: vfm-server
+          namespace: vfm-server-staging
           port: 80
       matches:
         - path: { type: Exact, value: /v1/events }
@@ -144,15 +153,15 @@ spec:
         request: "0s"                     # 0s = no timeout (Gateway API); without it Envoy cuts the stream
     - backendRefs:
         - kind: Service
-          name: vfm-server-stage
-          namespace: vfm-server
+          name: vfm-server
+          namespace: vfm-server-staging
           port: 80
       matches:
         - path: { type: PathPrefix, value: /v1 }   # register, items, inbox, logger, cache, info…
     - backendRefs:
         - kind: Service
-          name: vfm-server-stage
-          namespace: vfm-server
+          name: vfm-server
+          namespace: vfm-server-staging
           port: 80
       matches:
         - path: { type: Exact, value: / }          # landing page ("add this address in the app")
@@ -163,19 +172,19 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: vfm-server-stage-admin
-  namespace: vfm-server
+  name: vfm-server-admin
+  namespace: vfm-server-staging
 spec:
   hostnames:
-    - vfm-server-stage.internal.rune.local
+    - vfm-server-staging.internal.rune.local
   parentRefs:
     - name: gateway-internal
       namespace: gateway-system
   rules:
     - backendRefs:
         - kind: Service
-          name: vfm-server-stage
-          namespace: vfm-server
+          name: vfm-server
+          namespace: vfm-server-staging
           port: 80
       matches:
         - path: { type: Exact, value: /v1/events }
@@ -183,8 +192,8 @@ spec:
         request: "0s"
     - backendRefs:
         - kind: Service
-          name: vfm-server-stage
-          namespace: vfm-server
+          name: vfm-server
+          namespace: vfm-server-staging
           port: 80
       matches:
         - path: { type: PathPrefix, value: / }
@@ -202,12 +211,12 @@ spec:
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: vfm-server-stage-restrict
-  namespace: vfm-server
+  name: vfm-server-restrict
+  namespace: vfm-server-staging
 spec:
   endpointSelector:
     matchLabels:
-      app: vfm-server-stage
+      app: vfm-server
   ingress:
     - fromEntities:
         - world

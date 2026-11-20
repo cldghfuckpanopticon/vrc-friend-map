@@ -26,6 +26,8 @@ import { catppuccinVars, isCatFlavor } from "./catppuccin";
 import { ConfirmUnencrypted, ServersModal } from "./components/ServersModal";
 import { loadShared, startSharing, stopSharing } from "./share";
 import { startAccounts, stopAccounts } from "./accounts";
+import { startRecordSync, stopRecordSync } from "./recsync";
+import { ServerOnlyBar } from "./components/ServerOnlyBar";
 import { syncLive } from "./live";
 import { HereNow } from "./components/HereNow";
 import { SharedLists } from "./components/SharedLists";
@@ -98,14 +100,18 @@ export default function App() {
       await loadShared();
       initLogs();
       const info = await backend.sessionInfo().catch(() => ({ logged_in: false, user_id: null, display_name: null }));
-      setState({ session: info, mode: info.logged_in ? "app" : "login" });
+      // No VRChat login, but reading from a server: open the app with what's there.
+      const serverOnly = info.logged_in ? null : await backend.serverOnly.user().catch(() => null);
+      setState({ session: info, serverOnly, mode: info.logged_in || serverOnly ? "app" : "login" });
       if (info.logged_in) goLive();
       startAutoRefresh();
       unlisten.push(
         await backend.onLoginFinished(async (e) => {
           if (e.ok) {
+            // Logged in to VRChat now: stop reading from servers only.
+            if (getState().serverOnly) await backend.serverOnly.stop().catch(() => {});
             const session = await backend.sessionInfo();
-            setState({ session, mode: "app", loginBusy: false, loginMessage: "", demo: false });
+            setState({ session, mode: "app", loginBusy: false, loginMessage: "", demo: false, serverOnly: null });
             goLive();
           } else {
             setState({ loginBusy: false, loginMessage: e.message === "Login window closed" ? "" : e.message });
@@ -181,6 +187,7 @@ export default function App() {
       <LogsAndGroups />
       <ThemeSync />
       <TopBar />
+      <ServerOnlyBar />
       <Notice />
       <BetaHint />
       <div className="main" key={theme}>
@@ -263,9 +270,21 @@ function LogsAndGroups() {
   const { suggestions } = useGroupSuggestions();
   const lastApplied = useRef("");
   const mode = useApp((s) => s.mode);
+  const serverOnly = useApp((s) => s.serverOnly);
 
   useEffect(() => {
-    if (mode === "app" && !demo) {
+    if (mode === "app" && !demo && serverOnly) {
+      // No VRChat login: only records from servers.
+      stopObserving();
+      stopSharing();
+      stopAccounts();
+      stopBioCache();
+      stopHistory();
+      stopWatchers();
+      stopNotesLine();
+      stopExtras();
+      startRecordSync();
+    } else if (mode === "app" && !demo) {
       startObserving();
       startSharing();
       startBioCache();
@@ -275,7 +294,9 @@ function LogsAndGroups() {
       startServerLink();
       startExtras();
       void startAccounts();
+      startRecordSync();
     } else {
+      void stopRecordSync();
       stopObserving();
       stopSharing();
       stopAccounts();
@@ -285,7 +306,7 @@ function LogsAndGroups() {
       stopNotesLine();
       stopExtras();
     }
-  }, [mode, demo]);
+  }, [mode, demo, serverOnly]);
 
   useEffect(() => {
     refreshStats();

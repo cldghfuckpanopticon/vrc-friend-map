@@ -327,6 +327,24 @@ pub struct LeaseResponse {
     pub expires: i64,
 }
 
+/// The plaintext inside a sealed record: the real key and the value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Content<V> {
+    pub k: String,
+    pub v: V,
+}
+
+/// CBOR of a value (record contents before sealing).
+pub fn to_cbor<T: Serialize>(v: &T) -> Vec<u8> {
+    let mut out = Vec::new();
+    ciborium::into_writer(v, &mut out).expect("serializing to memory can't fail");
+    out
+}
+
+pub fn from_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    ciborium::from_reader(bytes).map_err(|e| format!("bad CBOR: {e}"))
+}
+
 /// CBOR, then zstd.
 pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     let mut cbor = Vec::new();

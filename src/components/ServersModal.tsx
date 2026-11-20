@@ -523,6 +523,15 @@ export function ServerCard({ server: s }: { server: ShareServer }) {
                 </label>
                 <Why text="Your circles, dismissed group suggestions, what you tell friends about people, and per-person notification rules (and settings, if that's on below) go to this server encrypted for your own key only, so the server can't read them. Your other devices pick them up when they sync; edits on both are merged. Your other devices need the same key: Copy key to another device. Age notes stay on each device." />
                 {s.syncMine && s.info?.deviceRelay && <DevicesHere url={s.url} />}
+                {s.info?.recordSync && (
+                  <>
+                    <label className="check">
+                      <input type="checkbox" checked={s.syncAll} onChange={(e) => set({ syncAll: e.target.checked })} />
+                      Sync all my data through this server (beta)
+                    </label>
+                    <Why text="Your friends, their profiles, statuses and the rest of what this app fetches from VRChat go to this server, encrypted for your own key, so your other devices can show them, even without a VRChat login (on the login screen: Use my data from a server). One logged-in device at a time sends it (a computer before a phone), so VRChat sees one connection. Your other devices need the same key: Copy key to another device." />
+                  </>
+                )}
                 <label className="check">
                   <input type="checkbox" checked={s.shareRemovals} disabled={!s.shareFriends} onChange={(e) => set({ shareRemovals: e.target.checked })} />
                   My friend removals

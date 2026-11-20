@@ -52,6 +52,11 @@ export interface LogsState {
 export interface AppState {
   mode: "loading" | "login" | "app";
   demo: boolean;
+  /** No VRChat login on this device: everything comes from servers (records), read only.
+   *  The account (VRChat user ID) this device reads as. */
+  serverOnly: string | null;
+  /** When records from a server last changed the cache (server-only devices show it). */
+  recordsAt: number;
   session: SessionInfo | null;
   loginMessage: string;
   loginBusy: boolean;
@@ -260,6 +265,7 @@ export const newServer = (url: string): ShareServer => ({
   syncMine: true,
   shareNotes: true,
   download: true,
+  syncAll: false,
   loggerOwner: false,
   ackUnencrypted: false,
   published: [],
@@ -353,6 +359,8 @@ const idleLogs = (): LogsState => ({
 let state: AppState = {
   mode: "loading",
   demo: false,
+  serverOnly: null,
+  recordsAt: 0,
   session: null,
   loginMessage: "",
   loginBusy: false,
@@ -831,6 +839,7 @@ function normalizeSharing(raw: unknown): SharingSettings {
             shareBlocks: bool(x.shareBlocks, false),
             shareTimezone: bool(x.shareTimezone, false),
             syncMine: bool(x.syncMine, true),
+            syncAll: bool(x.syncAll, false),
             shareNotes: bool(x.shareNotes, true),
             published: Array.isArray(x.published) ? x.published.filter((c: unknown) => typeof c === "string") : [],
             upload: bool(x.upload, n.upload),

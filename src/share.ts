@@ -92,6 +92,7 @@ function lite(r: InfoResult): ServerInfoLite {
     hiddenRecipients: (i.features ?? []).includes("hidden-recipients"),
     liveChanges: (i.features ?? []).includes("live-changes"),
     deviceRelay: (i.features ?? []).includes("device-relay"),
+    recordSync: (i.features ?? []).includes("sync1") && (i.features ?? []).includes("lease1"),
   };
 }
 

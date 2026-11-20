@@ -424,6 +424,8 @@ export interface ServerInfoLite {
   liveChanges?: boolean;
   /** The server passes messages between your own devices live. */
   deviceRelay?: boolean;
+  /** The server syncs records (all of your data) between your devices (vfm-server 0.13+). */
+  recordSync?: boolean;
 }
 
 export interface ShareServer {
@@ -466,6 +468,9 @@ export interface ShareServer {
   shareNotes: boolean;
   /** Fetch what others share with me here. */
   download: boolean;
+  /** Sync all my data through this server (records; beta): the device holding the
+   *  account's lease uploads its VRChat data, devices without a VRChat login read it. */
+  syncAll: boolean;
   /** You paired this server's logger. */
   loggerOwner: boolean;
   /** You confirmed uploading unencrypted to this server ("don't ask again"). */

@@ -335,6 +335,8 @@ textarea { width: 100%; resize: vertical; }
 /* ---------- 0.3.0: notices, colors, suggestions, map options ---------- */
 .notice { display: flex; align-items: flex-start; gap: 10px; padding: 8px 14px; background: rgba(25, 195, 177, 0.12); border-bottom: 1px solid rgba(25, 195, 177, 0.35); font-size: 13px; }
 .notice span { flex: 1; }
+.login-server { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.login-server .field { margin-top: 8px; }
 .warn { color: var(--warn); }
 .tiny-text { font-size: 11px; margin-top: 4px; }
 .row.tight { margin: 0; gap: 2px; }

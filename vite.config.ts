@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 const { version } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
@@ -16,7 +17,9 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
-    watch: { ignored: ["**/src-tauri/**"] },
+    watch: { ignored: ["**/src-tauri/**", "**/.tools/**"] },
   },
+  // .tools/ holds the Tauri checkout of the Chromium build (scripts/chromium.py) with its own tests.
+  test: { exclude: [...configDefaults.exclude, ".tools/**"] },
   build: { target: "es2021", chunkSizeWarningLimit: 1200 },
 });

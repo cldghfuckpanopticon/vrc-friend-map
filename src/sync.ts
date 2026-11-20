@@ -400,7 +400,8 @@ async function drainQueue(kind: "details" | "mutuals", gen: number) {
 
 export async function syncAll(opts: { friendsOnly?: boolean } = {}) {
   const s = getState();
-  if (s.demo || s.sync.running) return;
+  // Server-only devices have no VRChat login: their data comes as records (src/recsync.ts).
+  if (s.demo || s.serverOnly || s.sync.running) return;
   const gen = ++generation;
   setSync({ running: true, error: "", paused: false, done: 0, total: 0 });
   try {
@@ -577,7 +578,7 @@ export function startAutoRefresh() {
   let nextAt = Date.now() + gap();
   autoTimer = setInterval(() => {
     const s = getState();
-    if (s.demo || s.mode !== "app" || !s.settings.autoRefresh || s.sync.running) return;
+    if (s.demo || s.serverOnly || s.mode !== "app" || !s.settings.autoRefresh || s.sync.running) return;
     if (document.visibilityState !== "visible") return;
     if (Date.now() < nextAt) return;
     nextAt = Date.now() + gap();

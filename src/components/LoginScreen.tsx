@@ -1,12 +1,31 @@
 import { enterDemo } from "../session";
 import { backend } from "../backend";
 import { setState, updateSettings, useApp } from "../store";
+import { useState } from "react";
+import { startServerOnly } from "../recsync";
 
 export function LoginScreen({ canLogin }: { canLogin: boolean }) {
   const busy = useApp((s) => s.loginBusy);
   const message = useApp((s) => s.loginMessage);
   const contact = useApp((s) => s.settings.contact);
   const hasCache = useApp((s) => Object.keys(s.cache.friends).length > 0);
+  const [fromServer, setFromServer] = useState(false);
+  const [key, setKey] = useState("");
+  const [url, setUrl] = useState("");
+  const [serverBusy, setServerBusy] = useState(false);
+  const [serverErr, setServerErr] = useState("");
+
+  const useServer = async () => {
+    setServerBusy(true);
+    setServerErr("");
+    try {
+      await startServerOnly(key, url);
+    } catch (e) {
+      setServerErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setServerBusy(false);
+    }
+  };
 
   const start = async () => {
     setState({ loginBusy: true, loginMessage: "" });
@@ -58,6 +77,41 @@ export function LoginScreen({ canLogin }: { canLogin: boolean }) {
         )}
         {message && <p className="login-msg">{message}</p>}
         {busy && <p className="note">Finish signing in in the VRChat window. It closes by itself once you're in.</p>}
+
+        {canLogin && (
+          <div className="login-server">
+            {!fromServer ? (
+              <button className="btn link" onClick={() => setFromServer(true)}>
+                Use my data from a server instead (no VRChat login on this device)
+              </button>
+            ) : (
+              <>
+                <p className="note">
+                  Another device of yours, logged in to VRChat, syncs everything to your server (Servers → <em>Sync all my data through this
+                  server</em>). This device reads it, encrypted for your key. On that device use <em>Your key → Copy key to another device</em>{" "}
+                  and paste it here.
+                </p>
+                <label className="field">
+                  <span>Your key</span>
+                  <input type="password" value={key} placeholder="vfmkey1:usr_…" onChange={(e) => setKey(e.target.value)} />
+                </label>
+                <label className="field">
+                  <span>Server address</span>
+                  <input value={url} placeholder="https://vfm.example.com" onChange={(e) => setUrl(e.target.value)} />
+                </label>
+                <div className="login-actions">
+                  <button className="btn primary" disabled={serverBusy || !key.trim() || !url.trim()} onClick={useServer}>
+                    {serverBusy ? "Connecting…" : "Read my data from this server"}
+                  </button>
+                  <button className="btn ghost" onClick={() => setFromServer(false)}>
+                    Cancel
+                  </button>
+                </div>
+                {serverErr && <p className="login-msg">{serverErr}</p>}
+              </>
+            )}
+          </div>
+        )}
 
         <div className="login-footer">
           <button className="btn ghost" onClick={enterDemo}>

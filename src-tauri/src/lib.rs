@@ -45,13 +45,13 @@ type AppStateRef<'a> = State<'a, Arc<AppState>>;
 
 // ---------- sharing through vfm-servers (see share.rs) ----------
 
+/// The account server calls are made as: the VRChat login, or, without one, the
+/// account this device reads from servers only (`server_only_start`).
 async fn me_id(state: &AppState) -> Result<String, String> {
-    state
-        .api
-        .session_info()
-        .await
-        .user_id
-        .ok_or_else(|| "log in first".to_string())
+    if let Some(id) = state.api.session_info().await.user_id {
+        return Ok(id);
+    }
+    state.share.server_only_user().ok_or_else(|| "log in first".to_string())
 }
 
 #[tauri::command]
@@ -227,6 +227,9 @@ fn share_watch(app: AppHandle, urls: Vec<String>) {
                                     }
                                     share::WatchEvent::Change(o, k) => changed(&o, &k, false),
                                     share::WatchEvent::Resync => changed("", "", true),
+                                    share::WatchEvent::Sync(seq) => {
+                                        let _ = app2.emit("share-sync", serde_json::json!({ "url": u2, "seq": seq }));
+                                    }
                                     share::WatchEvent::Peer(blob) => {
                                         let _ = app2.emit("device-message", serde_json::json!({ "blob": blob, "via": u2 }));
                                     }
@@ -249,6 +252,55 @@ fn share_watch(app: AppHandle, urls: Vec<String>) {
         });
         map.insert(url, task);
     }
+}
+
+// ---------- record sync (see share_records.rs) ----------
+
+#[tauri::command]
+async fn records_lease(state: AppStateRef<'_>, url: String, device: String, priority: u8, release: bool) -> Result<vfm_share::records::LeaseResponse, String> {
+    let me = me_id(&state).await?;
+    state.share.records_lease(&url, &me, &device, priority, release).await
+}
+
+#[tauri::command]
+async fn records_sync(
+    state: AppStateRef<'_>,
+    url: String,
+    device: String,
+    full: bool,
+    reads: std::collections::BTreeMap<String, u32>,
+    changes: Vec<share::records::RecChange>,
+) -> Result<share::records::RecSyncResult, String> {
+    let me = me_id(&state).await?;
+    state.share.records_sync(&url, &me, &device, full, reads, changes).await
+}
+
+#[tauri::command]
+async fn records_key_ids(state: AppStateRef<'_>, items: Vec<(String, String)>) -> Result<Vec<String>, String> {
+    let me = me_id(&state).await?;
+    state.share.records_key_ids(&me, items).await
+}
+
+#[tauri::command]
+async fn records_forget(state: AppStateRef<'_>, url: String) -> Result<(), String> {
+    let me = me_id(&state).await?;
+    state.share.records_forget(&url, &me).await
+}
+
+/// Use the app without a VRChat login, as the account whose key is pasted.
+#[tauri::command]
+async fn server_only_start(state: AppStateRef<'_>, key: String) -> Result<share::MyIdentity, String> {
+    state.share.server_only_start(&key).await
+}
+
+#[tauri::command]
+async fn server_only_stop(state: AppStateRef<'_>) -> Result<(), String> {
+    state.share.server_only_stop().await
+}
+
+#[tauri::command]
+fn server_only_user(state: AppStateRef<'_>) -> Option<String> {
+    state.share.server_only_user()
 }
 
 #[tauri::command]
@@ -947,6 +999,13 @@ pub fn run() {
             share_unpublish,
             share_inbox,
             share_watch,
+            records_lease,
+            records_sync,
+            records_key_ids,
+            records_forget,
+            server_only_start,
+            server_only_stop,
+            server_only_user,
             accounts_list,
             account_remove,
             account_live,

@@ -37,6 +37,42 @@ export interface ApiResponse {
   retry_after: number | null;
 }
 
+export interface LeaseResult {
+  held: boolean;
+  holder?: string | null;
+  expires: number;
+}
+
+export interface RecChange {
+  c: string;
+  key: string;
+  value?: unknown;
+  deleted?: boolean;
+  hlc?: string;
+  observedAt: number;
+}
+
+export interface RecOut {
+  c: string;
+  /** The real key, or "#<key id>" for a deletion. */
+  key: string;
+  value: unknown;
+  deleted: boolean;
+  source: string;
+  observedAt: number;
+  hlc: string;
+  seq: number;
+}
+
+export interface RecSyncResult {
+  changes: RecOut[];
+  rejected: { c: string; key: string; why: string }[];
+  reset: boolean;
+  writeMax: Record<string, number>;
+  seq: number;
+  unreadable: number;
+}
+
 export interface SessionInfo {
   logged_in: boolean;
   user_id: string | null;
@@ -410,6 +446,26 @@ export const backend = {
     /** Signed small calls: shared cache, logger heartbeat, push targets. */
     call: <T = unknown>(url: string, method: "GET" | "PUT" | "POST" | "DELETE", path: string, body?: unknown) => need<T>("share_call", { url, method, path, body: body ?? null }),
     setName: (name: string) => (isTauri ? invoke<void>("share_set_name", { name }) : Promise.resolve()),
+  },
+  /** Record sync (src/recsync.ts): sealed and opened on the Rust side with your key. */
+  records: {
+    lease: (url: string, device: string, priority: number, release = false) =>
+      need<LeaseResult>("records_lease", { url, device, priority, release }),
+    sync: (url: string, device: string, full: boolean, reads: Record<string, number>, changes: RecChange[]) =>
+      need<RecSyncResult>("records_sync", { url, device, full, reads, changes }),
+    /** "#<key id>" for (collection, key) pairs, to match deletions. */
+    keyIds: (items: [string, string][]) => need<string[]>("records_key_ids", { items }),
+    forget: (url: string) => need<void>("records_forget", { url }),
+    onChanged(cb: (e: { url: string; seq: number }) => void): Promise<UnlistenFn> {
+      if (!isTauri) return Promise.resolve(() => {});
+      return listen<{ url: string; seq: number }>("share-sync", (e) => cb(e.payload));
+    },
+  },
+  /** Using the app without a VRChat login: reading your data from servers only. */
+  serverOnly: {
+    start: (key: string) => need<MyIdentity>("server_only_start", { key }),
+    stop: () => need<void>("server_only_stop"),
+    user: () => (isTauri ? invoke<string | null>("server_only_user") : Promise.resolve(null)),
   },
   onLoginProgress(cb: (e: LoginEvent) => void): Promise<UnlistenFn> {
     if (!isTauri) return Promise.resolve(() => {});

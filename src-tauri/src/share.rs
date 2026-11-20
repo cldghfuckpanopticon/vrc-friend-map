@@ -17,6 +17,9 @@ use vfm_share::{auth, Envelope, Identity, PublicIdentity, Recipient, ServerInfo}
 
 use crate::storage::write_private;
 
+#[path = "share_records.rs"]
+pub mod records;
+
 pub struct ShareState {
     dir: PathBuf,
     http: reqwest::Client,
@@ -30,6 +33,16 @@ pub struct ShareState {
     /// and their senders' cards, so only new versions are fetched.
     #[allow(clippy::type_complexity)]
     hidden_cache: std::sync::Mutex<std::collections::HashMap<String, (BTreeMap<String, Envelope>, BTreeMap<String, PublicIdentity>)>>,
+    /// Record-sync lease tokens per "url|user" (never given to the interface).
+    leases: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+/// Using the app without a VRChat login: your data comes from a server only,
+/// as the account whose key was pasted ("Copy key to another device").
+#[derive(Default, Serialize, Deserialize)]
+struct Account {
+    #[serde(default)]
+    server_only: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -151,6 +164,8 @@ pub enum WatchEvent {
     Resync,
     /// A sealed message from one of your other devices.
     Peer(String),
+    /// Your records changed on the server, up to this sequence.
+    Sync(u64),
 }
 
 /// One server-sent-events block ("event: …" and "data: …" lines, or a ": comment").
@@ -175,6 +190,10 @@ pub fn parse_event(block: &str) -> Option<WatchEvent> {
         "peer" => {
             let v: Value = serde_json::from_str(&data).ok()?;
             Some(WatchEvent::Peer(v["blob"].as_str()?.to_string()))
+        }
+        "sync" => {
+            let v: Value = serde_json::from_str(&data).ok()?;
+            Some(WatchEvent::Sync(v["seq"].as_u64()?))
         }
         _ => None,
     }
@@ -205,6 +224,7 @@ impl ShareState {
             name: std::sync::Mutex::new(String::new()),
             inbox_cache: Default::default(),
             hidden_cache: Default::default(),
+            leases: Default::default(),
         }
     }
 
@@ -273,6 +293,34 @@ impl ShareState {
             self.write("identity.json", &ids)?;
         }
         self.my_identity(user).await
+    }
+
+    /// The account this device uses without a VRChat login, if set.
+    pub fn server_only_user(&self) -> Option<String> {
+        self.read::<Account>("account.json").server_only
+    }
+
+    /// Start using the app without a VRChat login, as the account in `key_text`
+    /// (`vfmkey1:<user>:<secret>` from "Copy key to another device").
+    pub async fn server_only_start(&self, key_text: &str) -> Result<MyIdentity, String> {
+        let user = key_text
+            .trim()
+            .strip_prefix("vfmkey1:")
+            .and_then(|r| r.split_once(':'))
+            .map(|(u, _)| u.to_string())
+            .ok_or("that isn't a VRC Friend Map key (use \"Copy key to another device\" on a device where you're logged in)")?;
+        if !vfm_share::valid_user_id(&user) {
+            return Err("the key names an invalid account".into());
+        }
+        let me = self.import_key(&user, key_text).await?;
+        let _g = self.lock.lock().await;
+        self.write("account.json", &Account { server_only: Some(user) })?;
+        Ok(me)
+    }
+
+    pub async fn server_only_stop(&self) -> Result<(), String> {
+        let _g = self.lock.lock().await;
+        self.write("account.json", &Account::default())
     }
 
     async fn send(
@@ -1323,6 +1371,7 @@ mod watch_tests {
             Some(WatchEvent::Change("usr_a".into(), "friends".into()))
         );
         assert_eq!(parse_event("event: resync\ndata: {}\n\n"), Some(WatchEvent::Resync));
+        assert_eq!(parse_event("event: sync\ndata: {\"seq\":42}\n\n"), Some(WatchEvent::Sync(42)));
         assert_eq!(parse_event("event: change\ndata: nope\n\n"), None);
         assert_eq!(parse_event("event: peer\ndata: {\"blob\":\"x\"}\n\n"), Some(WatchEvent::Peer("x".into())));
     }

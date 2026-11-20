@@ -20,17 +20,17 @@ at all. Two parts:
     agent, a device's API connection, a PC's game log). Different producers write different
     records; the app combines them with a fixed order of which source wins for which fact
     (see "Authority").
-- **With an agent** (the account gave the server a VRChat session): the agent produces
+- **Default: no VRChat login on the server.** The client is the only source of truth for API
+  data: the device holding the account's lease fetches it and uploads all of it, end-to-end
+  encrypted; every other device of the account (a phone without a VRChat login) sees all of it.
+- **Optional, per account: an agent** (the account gives the server a VRChat session): it produces
   everything VRChat's API can give, 24/7, from one stable IP. Devices never talk to VRChat. A PC
   running VRChat adds what only the game log knows.
-- **Without an agent:** the client is the only source of truth for API data. The device holding
-  the account's lease fetches it and uploads all of it, end-to-end encrypted; every other device
-  of the account (a phone without a VRChat login) sees all of it.
 - **Data is records**, in collections that mirror what the app stores today, with a versioned
   schema shared by app and server, per-account sequence numbers so devices only move what
   changed, stored in **SQLite**.
-- **Agents for every account** on a server, behind a red, boxed warning that must be
-  acknowledged.
+- **Agents are opt-in, available to every account** on a server, behind a red, boxed warning
+  that must be acknowledged. Nothing changes for an account that doesn't set one up.
 - **Login storage:** never the password or a TOTP secret, only the session cookies, encrypted
   under a per-account data key. Unlocked by the account's own devices or a passphrase
   (attended, default); TPM / systemd credentials or a Kubernetes/KMS secret only as a reluctant,
@@ -82,8 +82,8 @@ everything else and the only one that can run 24/7.
 
 | Producer | Writes | When |
 |---|---|---|
-| **Agent** (server, per account) | API facts | Whenever the account has an agent: always (it holds the account's lease permanently) |
-| **A device's API connection** | API facts | Only without an agent: the device holding the account's **lease** |
+| **A device's API connection** | API facts | **Default** (no agent): the device holding the account's **lease** |
+| **Agent** (server, per account, opt-in) | API facts | Only if the account set one up: then always (it holds the account's lease permanently) |
 | **A PC's game log / OSC** | Game-log facts | Whenever VRChat runs on that PC. Not leased: each PC writes its own records |
 | **Any device** | The person's own data | When the person edits something |
 
@@ -220,7 +220,9 @@ Shape:
 
 ### Agents for every account
 
-- Any account on a server can set up an agent; the server owner isn't special.
+- **Off by default.** An account has no agent until its holder sets one up in the app; the
+  server never holds a VRChat login otherwise. Any account may do so; the server owner isn't
+  special. The operator can turn agents off for the whole server (`[agent] enabled`).
 - Per account: its own data key, key slots, agent state and lease. One account's devices unlock
   only that account's agent.
 - The admin page shows that an account has an agent and its state (locked / running / expired /
@@ -364,14 +366,15 @@ Privilege separation, as OpenSSH does it:
 Decided 2026-11-20:
 
 1. **System of record: the server**; authority per fact by richness (Part 1).
-2. **Agents for every account** on a server; the owner isn't special. Red, boxed warning that
-   must be acknowledged.
+2. **No VRChat login on the server by default.** Agents are opt-in per account, available to
+   every account on a server (the owner isn't special), behind a red, boxed warning that must be
+   acknowledged.
 3. **Sync everything**, as versioned records with per-account sequence numbers.
 4. **Schema versioned**: per collection and record, shared crate, forward compatible.
 5. **Storage: SQLite.**
 6. **Lease**: the agent holds it permanently when there is one; otherwise whoever is live.
-7. **Without an agent, the client is the only source of truth** for API data; it uploads all of
-   it, and every other device of the account sees it.
+7. **Without an agent (the default), the client is the only source of truth** for API data; it
+   uploads all of it, and every other device of the account sees it.
 8. **Key slots**: attended by default (the account's devices; passphrase optional); unattended
    (TPM / systemd credentials, Kubernetes / KMS) only as a reluctant opt-in by the operator *and*
    the account holder, behind a red warning.

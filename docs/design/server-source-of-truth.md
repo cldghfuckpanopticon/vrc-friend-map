@@ -17,17 +17,19 @@ Two questions:
   locations come from the server's agent, game-log visits come from my PC". A single switch
   can't express that the PC's game logs are always richer than the API, while the server's
   connection is the only one that runs 24/7.
-- Add one sync mechanism used in both cases: per-person **streams** of snapshots + deltas on
-  the server, which every device of that person reads and merges. When the app is the source,
+- Add one sync mechanism used in both cases: every piece of data is a **record** in a
+  collection (friends, profiles, visits, circles, …), versioned by a per-account sequence
+  number, so devices only send and fetch records that changed (see "Data schema and sync"). When the app is the source,
   the streams are end-to-end encrypted for the person's own key (like `self` items today). When
   the server's agent is the source, it writes them, so the server can read them; they're
   encrypted at rest.
 - Generalize today's hand-off into a **live-connection lease**: per VRChat account, exactly one
-  producer holds VRChat's live connection at a time (a PC app, a phone, or the server's agent),
-  so VRChat never sees the account twice. Everyone else reads.
+  producer holds VRChat's live connection at a time, so VRChat never sees the account twice.
+  With an agent set up, the agent always holds it; without, whoever is live (PC first).
+- Any account on a server can have an agent; the owner isn't special (decided).
 - **Never store the password or a TOTP secret.** Store only VRChat's session cookies. Encrypt
   them at rest under a data key that is *not* on the server's disk: by default it's held by
-  the owner's devices, which unlock the server automatically when one of them connects after a
+  the account's own devices, which unlock its agent automatically when one of them connects after a
   restart. Optional other key holders for unattended restarts: TPM / systemd credentials on bare
   metal, or a KMS / Kubernetes Secret.
 - In memory, keep the session in a small **separate agent process** that holds it in
@@ -114,49 +116,127 @@ column. The PC remains a producer for the second column whenever VRChat runs on 
   spaces them.
 - The PC still produces the game-log streams; those stay end-to-end encrypted, and devices merge
   them with the agent's streams. The server never needs to read them.
-- This is TODO.md "Round 9: use the app without logging in to VRChat in it", generalized.
+- This is TODO.md "Round 9: use the app without logging in to VRChat in it", for every account
+  on the server, not only the owner.
 
 ### Per-stream source, and the lease
 
-A setting per account on a server, per stream group:
+VRChat should see **one** live connection per account. The server hands out a **lease** per
+account (`POST /v1/lease`, one minute, renewed every minute, given up on exit). Only the holder
+talks to VRChat for the account's VRChat data and writes it; everyone else reads. A holder that
+stops renewing loses it, and the next one takes over. This is today's heartbeat hand-off made
+explicit and extended to phones.
 
-| Stream group | Choices |
+| Stream group | Who may hold the lease |
 |---|---|
-| VRChat data (friends, profiles, notifications) | `this device` / `server agent` / `whoever is live` (default: today's hand-off behavior) |
-| Game logs and OSC | `my PC` (only option) |
+| VRChat data (friends, presence, profiles, notifications, …) | With an agent set up: **the agent, always** (devices only read). Without: **whoever is live** (PC first, then a phone). |
+| Game logs and OSC | Not leased: only a PC running VRChat can produce them, and each PC writes its own visits. |
 
-"Whoever is live" is the **lease**: the server hands out a renewable lease for an account's
-live connection (`POST /v1/lease`, renewed every minute, given up on exit). The PC app takes it
-when it starts; the agent takes it back a few minutes after the last renewal. This is today's
-heartbeat hand-off made explicit and extended to phones. It guarantees one pipeline
-connection per account, which VRChat's guidelines ask for.
+Why "the agent, always" once there is one: it sees exactly the same API data the PC would,
+it's on 24/7, and one fixed producer means no handovers, no gaps and nothing to merge. The
+PC app then doesn't talk to VRChat for this data at all.
 
-### Sync protocol sketch
+## Data schema and sync
 
-- `PUT /v1/streams/{stream}` with `{seq_base, entries | snapshot}`, signed like items today.
-  Rejected if `seq_base` isn't the stream's current head (single writer per stream), so two
-  producers can't both write.
-- `GET /v1/streams?since={stream: seq, …}` returns everything newer; snapshot + following
-  deltas when a device is too far behind or new.
-- `/v1/events` sends `streams-changed` so devices fetch right away instead of polling.
-- Every entry carries `observed_at` and `source` (device or agent), so the app can show where
-  and when something came from ("from your server, 2 min ago").
-- Merging: VRChat-derived streams are single-writer, so no conflicts, only "newer wins".
-  Person-written data keeps the existing per-group "newer change wins" merge (`settingsAt`).
-- Retention: snapshots compact the deltas; history streams (`visits`, `together`) keep the
-  logger's existing retention (`keep_hops_months`).
-- Encryption: mode A streams and the PC's game-log streams are sealed for the account's own key
-  (end-to-end). Agent streams can't be: the server writes them. They're encrypted at rest with
-  the account's data key (Part 2), and travel over TLS.
+Goal: sync *everything* the app knows, across all of an account's devices, without sending
+whole files. A full `cache.json` for 300 friends is megabytes; resending it on every change would
+be the "16 MB a minute" case. Instead the unit of sync is one **record**, and a device only
+sends and fetches records that changed since it last synced.
 
-### Who may run an agent on a server
+### Records and collections
 
-A person's agent session gives that server **full control of their VRChat account**. So:
+Every piece of synced data is a record: `(collection, key) → value`. The collections map
+directly onto what the app stores today:
 
-- Default: only the server owner's account (as today: the logger owner).
-- The admin page can allow agents for other named accounts (a household, a partner), with
-  the app warning those people plainly before they hand over a session.
-- Never on servers with open registration. Public servers do mode A only.
+| Class | Collections (app source today) | Writer | Merge |
+|---|---|---|---|
+| **VRChat** | `me`; `friends`, `presence` (by user); `profiles` (`Cache.details`); `mutuals`; `favorites`; `groups`; `worlds`; `others`; `moderations`; `userNotes`; `notifications`; `alts` | lease holder | single writer: newest wins |
+| **Game log** | `visits` (`history.json`: one record per instance visit, with players, videos, screenshots, avatar switches); `live` (who's here now, one record per PC) | that PC | single writer per PC; visits from several PCs are separate records |
+| **Yours** | `circles`, `imports`, `nicknames`, `starred`, `timezones`, `worldNotes`, `inviteTemplates`, `blockReasons`, `shareNotes`, `sharedCircles`, `dismissedGroups`, `slotWatch`, `pushTargets`, settings groups | any device | per field, newest wins (hybrid logical clock); deletes are tombstones |
+| **Logs** | `friendLog`, `activity` | lease holder | append-only, union by entry ID |
+| **Never synced** | `ageNotes`, `ageHints`, `linkReads`, this device's push registration, graphics / frame rate / tray | n/a | stays on the device, as today |
+
+Derived data isn't synced: time together, suggested groups and stats are recomputed on each
+device from `visits`, `presence` history and `friendLog`. That keeps the synced set smaller and
+avoids two sources disagreeing.
+
+### Versioning
+
+- The server keeps one **sequence number per account**. Every accepted write gets the next one.
+- Each stored record keeps the sequence of its last change; a deleted record stays as a small
+  tombstone (key + sequence) for 90 days.
+- A device remembers one number: the highest sequence it has. "What changed?" is then
+  "records of this account with sequence > N", answered from an index, with no per-device
+  state on the server and no unbounded change log.
+- A device that has been away longer than tombstones are kept does a full fetch instead.
+- Each record also carries `observed_at` (when the producer saw it) and `source` (which device,
+  or the agent), so the app can say "from your server, 2 min ago".
+
+### One request does both directions
+
+```text
+POST /v1/sync            (signed like every request today)
+  { "since": 41873,
+    "lease": "…",                       // only from the lease holder, for VRChat collections
+    "changes": [ {c, k, v | deleted, hlc, observed_at}, … ] }
+→ { "seq": 41911, "changes": [ … everything after 41873, minus what this device just sent … ],
+    "more": false }
+```
+
+- Batched and compressed: CBOR or MessagePack, then zstd. A first sync is paginated (`more:
+  true`).
+- `/v1/events` (already there) sends `sync` with the new sequence number, so devices fetch
+  right away; no polling.
+- Writes are coalesced on the producer: presence and location changes go out every few seconds
+  as one batch, not one request per pipeline event.
+- Pictures aren't synced: records hold VRChat's image URLs, as the cache does today.
+
+### What this costs
+
+Rough numbers for 300 friends:
+
+| Situation | Data |
+|---|---|
+| First sync of a new device | everything once: about the size of today's `cache.json` + `history.json`, compressed (typically a few MB) |
+| An evening of friends moving between worlds | ~1 presence change per friend per 10 minutes ≈ 0.5 changes/s ≈ a few KB per minute |
+| A full friends-list refresh (every 30 min) where nothing changed | nothing: the producer only sends records whose content changed (it compares hashes) |
+| Your phone catching up after a day offline | only records changed that day |
+
+### Encryption of records
+
+- **Device-written records** (game logs, your data, and VRChat data while a device holds the
+  lease) are **end-to-end encrypted** per record with a key derived from the account's app key
+  (your devices share that key already). The server stores ciphertext.
+- **Keys are hidden too**: the server sees `HMAC(account key, "friends/usr_…")`, not the user
+  ID, so it doesn't learn who your friends are from the record names.
+- **Agent-written records** can't be end-to-end encrypted, because the server produces them.
+  They're encrypted at rest with the account's data key (Part 2), so a copy of the disk is
+  useless; the running server can read them, as it can read the VRChat session anyway.
+- Changing the lease from a device to the agent re-writes the VRChat collections in the agent's
+  encryption; the device's ciphertext versions become tombstones.
+
+### Server storage
+
+Today the server keeps JSON files per user. Record sync needs an index by `(account,
+sequence)`; an embedded database fits: **redb** (pure Rust, single file, keeps the static
+musl build and "one file, no dependencies") or SQLite (bundled; adds C code). Suggested: redb.
+
+### Agents for every account
+
+Any account on a server can set up an agent; the server owner's account is not special
+(decided). That means:
+
+- Per account: its own data key, its own key slots (Part 2), its own agent process state and
+  lease. One account's devices unlock only that account's agent.
+- The admin page shows that an account has an agent, its state (locked / running / expired)
+  and lets the admin stop or remove it, but never shows or exports the session.
+- **The operator problem stays**: whoever runs the server can, with enough effort, get at every
+  agent's session while it runs (Part 2, threat model). So the app shows a plain warning before
+  you hand a session to a server: "Whoever runs this server can control your VRChat account.
+  Only do this on a server run by you or someone you'd give your password to."
+- Limits: `[agent] max_agents` and a per-server cap on VRChat requests. Many accounts on one IP
+  look unusual to VRChat and may trigger its security checks; the admin page should say how many
+  agents run there.
 
 ## Part 2: keeping the VRChat login
 
@@ -171,7 +251,7 @@ ends the session or the password changes.
 |---|---|---|
 | Password | The account until it's changed; also every other site where it's reused | **Never stored.** Used once to log in, then zeroized. |
 | TOTP secret | Every future 2FA code, forever | **Never stored.** Storing it plus the password would let the server re-login unattended, but whoever gets the server then owns the account for good. |
-| Session cookies (`auth`, `twoFactorAuth`) | The account until the session ends or the password changes | **Stored, encrypted** (below). When VRChat ends the session, the owner logs in again (TODO.md "Round 9": expiry notice, renew from the app). |
+| Session cookies (`auth`, `twoFactorAuth`) | The account until the session ends or the password changes | **Stored, encrypted** (below). When VRChat ends the session, the account holder logs in again (TODO.md "Round 9": expiry notice, renew from the app). |
 
 Recovery if the server is compromised: change the VRChat password, which should end other
 sessions (to verify; TODO.md "Log out everywhere" asks the same question), and the app should
@@ -198,15 +278,16 @@ Envelope encryption, like LUKS key slots:
 
 | KEK slot | Unattended restart | Disk/backup theft | Fits | Notes |
 |---|---|---|---|---|
-| **Owner's devices** (recommended default) | No, but it unlocks itself as soon as any of the owner's devices connects (seconds, no typing) | ✔ | Everything | The DEK is sealed to the owner's app key (X25519, like `self` items). After a restart the server is "locked": the agent waits; the next authenticated request from an owner device carries the sealed DEK back (`POST /v1/agent/unlock`). The phone with the app in the background is usually enough. |
+| **The account's devices** (recommended default) | No, but it unlocks itself as soon as any of the account's devices connects (seconds, no typing) | ✔ | Everything | The DEK is sealed to the account's app key (X25519, like `self` items). After a restart that account's agent is "locked": it waits; the next authenticated request from one of the account's devices carries the sealed DEK back (`POST /v1/agent/unlock`). The phone with the app in the background is usually enough. |
 | **Passphrase** | No (type it on the admin page after a restart) | ✔ if strong | Everything | Argon2id-derived KEK. Fallback when no device is around. |
 | **systemd credentials / TPM2** | ✔ | ✔ (bound to that machine's TPM) | Bare metal, systemd | `systemd-creds encrypt --with-key=tpm2` and `LoadCredentialEncrypted=`; the service gets the KEK in `$CREDENTIALS_DIRECTORY` (non-swappable ramfs, only that service). |
 | **Kubernetes Secret / KMS** | ✔ | ✔ only if the Secret store is protected separately (etcd encryption with KMS, External Secrets / OpenBao) | Kubernetes | KEK from an env var or mounted file; a PVC snapshot alone then isn't enough. Equally good: OpenBao/Vault transit, so the KEK never reaches the pod. |
 | **A key file next to the data** | ✔ | ✘ | — | Equivalent to today's plaintext. Only as an explicit "I accept this" choice. |
 
-Defaults: owner's devices + passphrase. The admin page lists the slots, and adds or removes
-them. A server with no unlocked DEK runs everything except the agent, and says why ("locked
-since restart: open the app on one of your devices").
+Defaults, per account: that account's devices + an optional passphrase, both managed in the
+app (the admin page only sees "locked / unlocked"). A locked agent doesn't run; everything else
+on the server does, and the app says why ("locked since restart: open the app on one of your
+devices").
 
 ### Tier 2: in memory (while running)
 
@@ -260,25 +341,35 @@ Privilege separation, as OpenSSH does it:
 
 ## Plan
 
-1. **Session at rest, now**: encrypt `logger/session.json` with a DEK + owner-device slot +
+1. **Session at rest, now**: encrypt `logger/session.json` with a DEK + device slot +
    passphrase slot; locked/unlocked state on the admin page and in the app. Fixes the plaintext
    file without changing anything else. Small.
 2. **Agent process**: split the VRChat client out of the HTTP process; `memfd_secret`,
    dumpable 0, seccomp. Medium.
-3. **Streams + lease**: the sync protocol, mode A for all devices (no credentials needed),
-   lease replacing the heartbeat hand-off. Large.
-4. **Mode B**: the agent writes the VRChat streams; devices read them and send writes through
-   it; the app can run with no VRChat login on owner devices (Round 9). Large.
+3. **Record sync + lease**: the schema, `/v1/sync`, redb storage, mode A for all of an
+   account's devices (no credentials on the server), lease replacing the heartbeat hand-off.
+   Start with the VRChat collections a phone without login needs (`me`, `friends`, `presence`,
+   `profiles`, `worlds`), then everything else. Large.
+4. **Mode B**: per-account agents write the VRChat collections; devices read them and send
+   writes through the agent; the app can run with no VRChat login in it (Round 9, for every
+   account). Large.
 5. Expiry notice and renew-from-app (Round 9), using the same sealed-login path.
 
-## Questions for the owner
+## Decisions and open questions
 
-1. Agents for anyone but the server owner: allowed at all, or owner only?
-2. Default KEK slots: owner devices + passphrase? Should unattended slots (TPM, Kubernetes)
-   need an explicit "I accept" on the admin page?
-3. Mode A streams: which data first? Suggested: friends + statuses + profiles (what a phone
-   without login needs), then visits / time together from the PC.
-4. Lease default: "whoever is live" (today's hand-off), or "server agent always" when one exists?
+Decided (2026-11-20):
+
+1. Agents for every account on a server, no distinction for the owner.
+2. Sync everything, as records with per-account sequence numbers (above).
+
+Open:
+
+1. Key slots: are unattended slots (TPM / systemd credentials, Kubernetes Secret) allowed, and
+   only behind an explicit "I accept that whoever controls this machine can unlock it"?
+   Recommended default per account: your devices + an optional passphrase.
+2. Lease: "the agent, always" once an agent exists, "whoever is live" otherwise (recommended),
+   or should a running PC app still take over from the agent?
+3. Server database: redb (pure Rust) or SQLite?
 
 ## Checked
 

@@ -621,6 +621,37 @@ async fn logs_timeline(
         .map_err(|e| e.to_string())?
 }
 
+/// This device's visits for record sync: [key, {visit, names}].
+#[tauri::command]
+async fn logs_own_visits(state: AppStateRef<'_>) -> Result<Vec<(String, gamelogs::SyncedVisit)>, String> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || st.logs.own_visits()).await.map_err(|e| e.to_string())?
+}
+
+/// Visits from another of your VRChat clients (record sync).
+#[tauri::command]
+async fn logs_remote_apply(
+    state: AppStateRef<'_>,
+    source: String,
+    upserts: Vec<(String, gamelogs::SyncedVisit)>,
+    deletes: Vec<String>,
+) -> Result<(), String> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || st.logs.remote_apply(&source, upserts, deletes)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn logs_remote_keys(state: AppStateRef<'_>) -> Result<Vec<(String, String)>, String> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || st.logs.remote_keys()).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn logs_remote_clear(state: AppStateRef<'_>) -> Result<(), String> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || st.logs.remote_clear()).await.map_err(|e| e.to_string())?
+}
+
 /// People from your game logs who aren't friends, by time with you.
 #[tauri::command]
 async fn logs_met(
@@ -1000,6 +1031,10 @@ pub fn run() {
             share_inbox,
             share_watch,
             records_lease,
+            logs_own_visits,
+            logs_remote_apply,
+            logs_remote_keys,
+            logs_remote_clear,
             records_sync,
             records_key_ids,
             records_forget,

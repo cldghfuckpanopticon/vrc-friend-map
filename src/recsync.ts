@@ -13,9 +13,10 @@
 //   keeps VRChat's live connection for now (invites and notifications aren't records
 //   yet). When the holder goes away it takes the lease and fetches again itself.
 
-import { backend, isMobile, type RecOut } from "./backend";
-import { emptyCache, getState, setState, subscribeState, updateCache, updateServer } from "./store";
+import { backend, isMobile, type RecOut, type RecSyncResult } from "./backend";
+import { emptyCache, getState, setLogs, setState, subscribeState, updateCache, updateServer } from "./store";
 import { syncAll } from "./sync";
+import { refreshStats } from "./logs";
 import { addServer } from "./share";
 import type { Cache, ShareServer } from "./types";
 
@@ -169,20 +170,30 @@ let unsubscribe: (() => void) | null = null;
 let unlisten: (() => void) | null = null;
 let lastCache: Cache | null = null;
 
-const sentKey = (s: ShareServer) => `vfm-recsync-sent:${s.id}`;
-function loadSent(s: ShareServer): Record<string, number> {
+type SentKind = "api" | "visits";
+const sentKey = (s: ShareServer, kind: SentKind) => (kind === "api" ? `vfm-recsync-sent:${s.id}` : `vfm-recsync-sent-${kind}:${s.id}`);
+/** What was last uploaded (hashes per record), kept in localStorage; in memory where that
+ *  isn't available (then the worst case is one full upload per start). */
+const sentMemory = new Map<string, Record<string, number>>();
+function loadSent(s: ShareServer, kind: SentKind = "api"): Record<string, number> {
+  const k = sentKey(s, kind);
   try {
-    return JSON.parse(localStorage.getItem(sentKey(s)) ?? "{}");
+    const v = localStorage.getItem(k);
+    if (v != null) return JSON.parse(v);
   } catch {
-    return {};
+    /* fall back to memory */
   }
+  return sentMemory.get(k) ?? {};
 }
-function saveSent(s: ShareServer, v: Record<string, number> | null) {
+function saveSent(s: ShareServer, v: Record<string, number> | null, kind: SentKind = "api") {
+  const k = sentKey(s, kind);
+  if (v) sentMemory.set(k, v);
+  else sentMemory.delete(k);
   try {
-    if (v) localStorage.setItem(sentKey(s), JSON.stringify(v));
-    else localStorage.removeItem(sentKey(s));
+    if (v) localStorage.setItem(k, JSON.stringify(v));
+    else localStorage.removeItem(k);
   } catch {
-    /* only costs a full upload next time */
+    /* memory only */
   }
 }
 
@@ -247,6 +258,8 @@ async function push(s: ShareServer) {
     const rejected = new Set<string>();
     for (let i = 0; i < changes.length; i += CHUNK) {
       const res = await backend.records.sync(s.url, device(), false, READS, changes.slice(i, i + CHUNK));
+      // The answer also carries what other devices wrote meanwhile (their visits).
+      await applyResult(s, res, false);
       for (const x of res.rejected) {
         rejected.add(id(x.c, x.key));
         if (x.why === "lease") r.held = false;
@@ -270,18 +283,89 @@ async function push(s: ShareServer) {
  *  device, applies it. `full`: everything (when starting to follow). */
 async function pull(s: ShareServer, full = false) {
   await exclusive(s, async () => {
-    const st = getState();
     const res = await backend.records.sync(s.url, device(), full, READS, []);
-    const reads = st.serverOnly || st.following === s.url;
-    if (!reads) return; // the lease holder fetches from VRChat itself
+    await applyResult(s, res, full);
+  });
+}
+
+/** Take in what a sync answer brought: VRChat data (on devices that read it) and other
+ *  VRChat clients' visits (everywhere). */
+async function applyResult(s: ShareServer, res: RecSyncResult, full: boolean) {
+  const st = getState();
+  if (res.unreadable) note(s, `${res.unreadable} records couldn't be opened (another key?)`);
+  // VRChat data: only where this device doesn't fetch it itself.
+  if (st.serverOnly || st.following === s.url) {
     const api = res.changes.filter((c) => API_COLLECTIONS.includes(c.c));
     // Replace this device's copy only if the server really has the account's data (the
     // holder may have just taken the lease and not uploaded yet): never wipe it for nothing.
     const replace = (res.reset || full) && api.some((c) => c.c === "me" && c.key === "me" && !c.deleted);
     const resolved = await resolveDeletions(replace ? emptyCache() : getState().cache, api);
     updateCache((c) => applyRecords(replace ? { ...emptyCache(), linkReads: c.linkReads, ageHints: c.ageHints } : c, resolved));
-    if (res.unreadable) note(s, `${res.unreadable} records couldn't be opened (another key?)`);
     if (api.length) setState({ recordsAt: Date.now() });
+  }
+  // Visits from your other VRChat clients.
+  const visits = res.changes.filter((c) => c.c === "visits" && c.source !== device());
+  if (res.reset) await backend.logsRemoteClear();
+  if (!visits.length) return;
+  const gone = await resolveVisitDeletions(visits.filter((v) => v.deleted && v.key.startsWith("#")));
+  const bySource = new Map<string, { up: [string, unknown][]; del: string[] }>();
+  const slot = (src: string) => bySource.get(src) ?? bySource.set(src, { up: [], del: [] }).get(src)!;
+  for (const v of visits) {
+    if (v.deleted) {
+      const g = gone.get(v.key);
+      if (g) slot(g.source).del.push(g.key);
+    } else {
+      const prefix = `${v.source}/`;
+      if (v.key.startsWith(prefix)) slot(v.source).up.push([v.key.slice(prefix.length), v.value]);
+    }
+  }
+  for (const [src, { up, del }] of bySource) await backend.logsRemoteApply(src, up, del);
+  const report = await backend.logsInfo().catch(() => null);
+  if (report) setLogs({ report });
+  void refreshStats(true);
+}
+
+/** Visit deletions arrive as "#<key id>": match them against the stored visits of other clients. */
+async function resolveVisitDeletions(gone: RecOut[]): Promise<Map<string, { source: string; key: string }>> {
+  const out = new Map<string, { source: string; key: string }>();
+  if (!gone.length) return out;
+  const stored = await backend.logsRemoteKeys();
+  const ids = await backend.records.keyIds(stored.map(([src, key]) => ["visits", `${src}/${key}`]));
+  const want = new Set(gone.map((g) => g.key));
+  ids.forEach((kid, i) => {
+    if (want.has(kid)) out.set(kid, { source: stored[i][0], key: stored[i][1] });
+  });
+  return out;
+}
+
+/** Upload this device's own game-log visits (no lease: each VRChat client writes its own). */
+async function pushVisits(s: ShareServer) {
+  if (getState().serverOnly) return;
+  await exclusive(s, async () => {
+    const own = await backend.logsOwnVisits();
+    if (!own.length && !Object.keys(loadSent(s, "visits")).length) return;
+    const current = new Map<string, Rec>(own.map(([k, v]) => {
+      const key = `${device()}/${k}`;
+      return [id("visits", key), { c: "visits", key, value: v }];
+    }));
+    const sent = loadSent(s, "visits");
+    const { upserts, deletes, hashes } = diffRecords(current, sent);
+    const now = Date.now();
+    const changes = [
+      ...upserts.map((x) => ({ c: x.c, key: x.key, value: x.value, observedAt: now })),
+      ...deletes.map((x) => ({ c: x.c, key: x.key, deleted: true, observedAt: now })),
+    ];
+    if (!changes.length) return;
+    const rejected = new Set<string>();
+    for (let i = 0; i < changes.length; i += CHUNK) {
+      const res = await backend.records.sync(s.url, device(), false, READS, changes.slice(i, i + CHUNK));
+      await applyResult(s, res, false);
+      res.rejected.forEach((x) => rejected.add(id(x.c, x.key)));
+    }
+    const next: Record<string, number> = {};
+    for (const [k, h] of Object.entries(hashes)) if (!rejected.has(k)) next[k] = h;
+    saveSent(s, next, "visits");
+    note(s, `uploaded ${changes.length - rejected.size} visit changes`);
   });
 }
 
@@ -339,14 +423,12 @@ export async function leaseRound() {
       } else if (!l.held && was) {
         note(s, `lease now with ${l.holder ?? "another device"}`);
       }
-      if (!l.held) {
-        if (getState().following !== s.url && l.holder && l.holder !== device()) {
-          // Another of your devices fetches for the account: read from it instead.
-          note(s, `following ${l.holder}`);
-          setState({ following: s.url });
-          void pull(s, true);
-        } else schedulePull(s, 0);
-      }
+      if (!l.held && getState().following !== s.url && l.holder && l.holder !== device()) {
+        // Another of your devices fetches for the account: read from it instead.
+        note(s, `following ${l.holder}`);
+        setState({ following: s.url });
+        void pull(s, true);
+      } else schedulePull(s, 0); // the holder too: other clients' visits
     } catch (e) {
       note(s, `lease failed: ${e}`);
     }
@@ -358,11 +440,21 @@ export function startRecordSync() {
   void leaseRound();
   leaseTimer = setInterval(() => void leaseRound(), LEASE_EVERY_MS);
   lastCache = getState().cache;
+  let lastReport = getState().logs.report;
+  for (const s of recordServers()) setTimeout(() => void pushVisits(s), 3_000);
   unsubscribe = subscribeState(() => {
-    const c = getState().cache;
-    if (c === lastCache) return;
-    lastCache = c;
-    for (const s of recordServers()) if (run(s).held) schedulePush(s);
+    const st = getState();
+    if (st.cache !== lastCache) {
+      lastCache = st.cache;
+      for (const s of recordServers()) if (run(s).held) schedulePush(s);
+    }
+    // A log scan finished (new visits, or old ones expired): upload this device's visits.
+    // (Only a real scan: summaries refreshed after taking in other clients' visits don't count.)
+    if (st.logs.report !== lastReport) {
+      lastReport = st.logs.report;
+      if (!st.logs.report?.files_seen) return;
+      for (const s of recordServers()) setTimeout(() => void pushVisits(s), 2_000);
+    }
   });
   // Without a VRChat login the sharing code (which keeps the servers' live streams
   // open) doesn't run, so open them here.
@@ -370,7 +462,7 @@ export function startRecordSync() {
   void backend.records
     .onChanged((e) => {
       const s = recordServers().find((x) => x.url === e.url);
-      if (s && !run(s).held) schedulePull(s);
+      if (s) schedulePull(s);
     })
     .then((u) => (unlisten = u));
 }
@@ -397,6 +489,7 @@ export async function stopRecordSync() {
 /** Sync records with this server right now (the "Sync now" button). */
 export async function syncRecordsNow(s: ShareServer) {
   if (run(s).held) await push(s);
+  await pushVisits(s);
   await pull(s);
 }
 

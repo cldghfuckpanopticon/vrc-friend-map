@@ -105,7 +105,8 @@ export async function scanLogs(manual: boolean) {
 /** Recompute time-together statistics for the current friend list. */
 export async function refreshStats(force = false) {
   const s = getState();
-  if (s.demo || !isTauri || !logsSupported(s.logs.platform)) return;
+  // Also where this device can't read game logs itself, if other clients' visits arrived (src/recsync.ts).
+  if (s.demo || !isTauri || (!logsSupported(s.logs.platform) && !s.logs.report?.visits)) return;
   const friendIds = Object.keys(s.cache.friends).sort();
   const g = s.settings.groups;
   const selfId = s.cache.me?.id ?? s.session?.user_id ?? null;

@@ -702,6 +702,96 @@ impl LogStore {
     pub fn timeline(&self, from: i64, to: i64) -> Result<Vec<TimelineVisit>, String> {
         self.with_history(|h| timeline(h, from, to))
     }
+
+    // ---------- visits from your other VRChat clients (record sync) ----------
+
+    /// This device's own visits, for uploading: (key, visit with its players' names).
+    pub fn own_visits(&self) -> Result<Vec<(String, SyncedVisit)>, String> {
+        self.with_history(|h| {
+            let mut out = Vec::new();
+            for (name, f) in &h.files {
+                if name.starts_with(REMOTE_PREFIX) {
+                    continue;
+                }
+                for v in &f.visits {
+                    out.push((visit_key(v), SyncedVisit::of(v, &h.names)));
+                }
+            }
+            out
+        })
+    }
+
+    /// Visits another VRChat client of yours uploaded: stored as `remote:<source>`, so the
+    /// Logbook, time together and "met" include them like your own.
+    pub fn remote_apply(&self, source: &str, upserts: Vec<(String, SyncedVisit)>, deletes: Vec<String>) -> Result<(), String> {
+        let file = format!("{REMOTE_PREFIX}{source}");
+        self.with_history(|h| {
+            let History { files, names, .. } = h;
+            let entry = files.entry(file.clone()).or_default();
+            for (key, sv) in upserts {
+                entry.visits.retain(|v| visit_key(v) != key);
+                entry.visits.push(sv.visit);
+                for (id, n) in sv.names {
+                    names.entry(id).or_insert(n);
+                }
+            }
+            entry.visits.retain(|v| !deletes.contains(&visit_key(v)));
+            entry.visits.sort_by_key(|v| v.start);
+            if entry.visits.is_empty() {
+                files.remove(&file);
+            }
+            self.save(h)
+        })?
+    }
+
+    /// (source, key) of every stored visit from another client, to match deletions.
+    pub fn remote_keys(&self) -> Result<Vec<(String, String)>, String> {
+        self.with_history(|h| {
+            h.files
+                .iter()
+                .filter_map(|(name, f)| name.strip_prefix(REMOTE_PREFIX).map(|src| (src, f)))
+                .flat_map(|(src, f)| f.visits.iter().map(move |v| (src.to_string(), visit_key(v))))
+                .collect()
+        })
+    }
+
+    /// Forget all visits from other clients (the server asked to start over).
+    pub fn remote_clear(&self) -> Result<(), String> {
+        self.with_history(|h| {
+            h.files.retain(|name, _| !name.starts_with(REMOTE_PREFIX));
+            self.save(h)
+        })?
+    }
+}
+
+/// History entries holding visits from your other VRChat clients: `remote:<device>`.
+pub const REMOTE_PREFIX: &str = "remote:";
+
+/// A visit's identity across devices: the instance and when you entered it.
+pub fn visit_key(v: &Visit) -> String {
+    format!("{}|{}", v.world, v.start)
+}
+
+/// A visit as it travels to your other devices: with its players' names, and screenshots
+/// reduced to file names (the folder is this device's).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SyncedVisit {
+    pub visit: Visit,
+    #[serde(default)]
+    pub names: BTreeMap<String, String>,
+}
+
+impl SyncedVisit {
+    pub fn of(v: &Visit, names: &BTreeMap<String, String>) -> SyncedVisit {
+        let mut visit = v.clone();
+        for s in &mut visit.shots {
+            if let Some(file) = std::path::Path::new(&s.path).file_name() {
+                s.path = file.to_string_lossy().into_owned();
+            }
+        }
+        let names = v.players.iter().filter_map(|p| names.get(&p.id).map(|n| (p.id.clone(), n.clone()))).collect();
+        SyncedVisit { visit, names }
+    }
 }
 
 /// A visit for the timeline, with names.
@@ -1443,5 +1533,45 @@ mod real_logs {
             .unwrap();
         assert_eq!(r2.files_read, 0);
         let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn visits_from_other_clients() {
+        let dir = std::env::temp_dir().join(format!("vfm-remote-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = LogStore::new(dir.join("history.json"));
+        let v = |start: i64, shot: &str| Visit {
+            world: "wrld_a:1~private(usr_x)".into(),
+            world_name: "Cozy".into(),
+            access: "private".into(),
+            start,
+            end: start + 3600,
+            players: vec![Stint { id: "usr_f".into(), from: start, to: start + 3000 }],
+            videos: vec![],
+            shots: vec![ShotEvent { t: start + 10, path: shot.into() }],
+            avatars: vec![],
+        };
+        // A visit from "quest", with its player's name and a screenshot path.
+        let names: BTreeMap<String, String> = [("usr_f".to_string(), "Fox".to_string())].into();
+        let sv = SyncedVisit::of(&v(1000, "/home/me/Pictures/VRChat/VRChat_1.png"), &names);
+        assert_eq!(sv.visit.shots[0].path, "VRChat_1.png", "only the file name travels");
+        assert_eq!(sv.names.get("usr_f").map(String::as_str), Some("Fox"));
+        store.remote_apply("quest", vec![(visit_key(&sv.visit), sv.clone())], vec![]).unwrap();
+        // It counts like a local one…
+        let report = store.info().unwrap();
+        assert_eq!(report.visits, 1);
+        assert_eq!(store.timeline(0, 10_000).unwrap().len(), 1);
+        // …but isn't uploaded again as this device's own.
+        assert!(store.own_visits().unwrap().is_empty());
+        assert_eq!(store.remote_keys().unwrap(), vec![("quest".to_string(), visit_key(&sv.visit))]);
+        // Updating replaces, deleting removes, clearing forgets everything from other clients.
+        store.remote_apply("quest", vec![(visit_key(&sv.visit), sv.clone())], vec![]).unwrap();
+        assert_eq!(store.info().unwrap().visits, 1);
+        store.remote_apply("quest", vec![], vec![visit_key(&sv.visit)]).unwrap();
+        assert_eq!(store.info().unwrap().visits, 0);
+        store.remote_apply("quest", vec![(visit_key(&sv.visit), sv)], vec![]).unwrap();
+        store.remote_clear().unwrap();
+        assert_eq!(store.info().unwrap().visits, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -305,6 +305,12 @@ export const backend = {
     if (!isTauri) return [];
     return invoke("pictures_list", { dirs });
   },
+  /** This device's visits for record sync: [key, {visit, names}]. */
+  logsOwnVisits: () => (isTauri ? invoke<[string, unknown][]>("logs_own_visits") : Promise.resolve([] as [string, unknown][])),
+  /** Visits from another of your VRChat clients (by its device ID). */
+  logsRemoteApply: (source: string, upserts: [string, unknown][], deletes: string[]) => need<void>("logs_remote_apply", { source, upserts, deletes }),
+  logsRemoteKeys: () => need<[string, string][]>("logs_remote_keys"),
+  logsRemoteClear: () => need<void>("logs_remote_clear"),
   async logsClear(): Promise<void> {
     if (isTauri) await invoke("logs_clear");
   },
